@@ -207,7 +207,7 @@ pub(crate) fn refine_kkt_extended_precision(
     let factor = {
         let mut dp = DELTA_P;
         let mut dd = DELTA_D;
-        let mut cur_k = k_mat.clone();
+        let mut cur_k = k_mat; // clone だと K (nnzQ+2nnzA+n+m, 24 B/nnz) が IR 中二重常駐
         let mut factor_result: Option<otspot_num::linalg::ldl::LdlFactorizationAmd> = None;
         let mut retries = 0usize;
         loop {

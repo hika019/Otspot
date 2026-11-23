@@ -39,8 +39,9 @@ const REDUCED_TIMEOUT_QP_INJECT_ITERS: usize = 6271;
 fn timeout_result_lp_dispatch(options: &SolverOptions) -> SolverResult {
     let mut r = SolverResult::timeout();
     r.stats.route = SolveRoute::LpForwardedFromQp;
-    // Independent clock check, not an alias of the status: the huge-wide-LP
-    // predictive guard calls this without the deadline having expired.
+    // Independent clock check, not an alias of the status: mint sites claim
+    // Timeout only after the deadline has actually expired, but the stamp is
+    // re-derived from the clock so a false claim can never reach the caller.
     r.stats.deadline_triggered = options.external_stop_requested();
     r
 }
@@ -347,9 +348,6 @@ fn solve_lp_backend_no_presolve_with_gate(
     gate_lp: &LpProblem,
     options: &SolverOptions,
 ) -> SolverResult {
-    if huge_wide_lp_timeout_guard(lp) && options.deadline.is_some() {
-        return timeout_result_lp_dispatch(options);
-    }
     let mut result = if should_try_lp_ipm(gate_lp, options) {
         let ipm = solve_lp_with_ipm_backend(lp, options);
         // Stalled / MaxIterations もここで受理する: crossover 済みの非収束 iterate を
@@ -394,18 +392,8 @@ fn should_try_lp_ipm(lp: &LpProblem, options: &SolverOptions) -> bool {
     {
         return false;
     }
-    if huge_wide_lp_timeout_guard(lp) {
-        return false;
-    }
     lp.num_vars.saturating_add(lp.num_constraints) >= LP_IPM_MIN_DIMENSION
         && lp.a.values().len() >= LP_IPM_MIN_DIMENSION
-}
-
-const HUGE_WIDE_LP_MIN_VARS: usize = 300_000;
-const HUGE_WIDE_LP_MAX_CONSTRAINTS: usize = 100_000;
-
-fn huge_wide_lp_timeout_guard(lp: &LpProblem) -> bool {
-    lp.num_vars >= HUGE_WIDE_LP_MIN_VARS && lp.num_constraints <= HUGE_WIDE_LP_MAX_CONSTRAINTS
 }
 
 fn solve_lp_with_ipm_backend(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
@@ -1477,6 +1465,76 @@ mod tests {
         assert_eq!(result.status, SolveStatus::Timeout);
         assert_eq!(result.stats.route, SolveRoute::LpForwardedFromQp);
         assert!(result.stats.deadline_triggered);
+    }
+
+    /// 期限が残り十分な huge-wide shape LP を backend gate が偽 Timeout に
+    /// しないこと。A/B 実測で rail4284/rail2586/nug30 が `--timeout 1000` に対し
+    /// 数秒・iters=0 で Timeout を返した真因は、backend 入口の
+    /// 「shape ヒューリスティック + deadline 存在」早期 Timeout (残り予算 999s
+    /// で発火を実測) だった。shape 条件が deadline の残量と無関係に求解自体を
+    /// 打ち切ってよい根拠はないため、huge-wide LP も通常通り求解されなければならない。
+    ///
+    /// オラクル (手計算): min −x₀ s.t. x₀ ≤ 1, x ≥ 0 → x₀ = 1, obj* = −1。
+    ///
+    /// ## Sentinel (no-op-fail)
+    /// backend 入口に除去した `n ≥ 300_000 ∧ m ≤ 100_000 ∧ deadline.is_some()`
+    /// の無条件 Timeout 早返回 (3c25e880 の guard) を戻すと status=Timeout
+    /// (iters=0) となり FAIL。
+    #[test]
+    fn huge_wide_lp_solves_when_deadline_has_slack() {
+        /// 偽 Timeout を mint した guard の下限 shape そのもの (n = 300_000)。
+        /// should_try_lp_ipm の aspect gate (n/m > 2.2 で IPM 拒否) も同時に
+        /// 満たすため、n/m ≥ 3 のこの shape は simplex backend へ届く。
+        const SENTINEL_VARS: usize = 300_000;
+        /// x₀ ≤ 1 だけの 1 行。guard の m ≤ 100_000 を満たす最小行数。
+        const SENTINEL_ROWS: usize = 1;
+        /// trivial LP がこの規模でも余る予算。guard が「deadline の存在」だけで
+        /// 発火する実装に戻すと、求解開始前に殺されるため必ず検出できる。
+        const SENTINEL_DEADLINE_SECS: u64 = 60;
+        const SENTINEL_EXPECTED_OBJ: f64 = -1.0;
+        const SENTINEL_OBJ_TOL: f64 = 1e-9;
+
+        let a = CscMatrix::from_triplets(
+            &[0usize; SENTINEL_ROWS],
+            &[0usize; SENTINEL_ROWS],
+            &[1.0f64; SENTINEL_ROWS],
+            SENTINEL_ROWS,
+            SENTINEL_VARS,
+        )
+        .unwrap();
+        let mut c = vec![0.0f64; SENTINEL_VARS];
+        c[0] = -1.0;
+        let problem = QpProblem::new(
+            CscMatrix::new(SENTINEL_VARS, SENTINEL_VARS),
+            c,
+            a,
+            vec![1.0f64; SENTINEL_ROWS],
+            vec![(0.0f64, f64::INFINITY); SENTINEL_VARS],
+            vec![ConstraintType::Le; SENTINEL_ROWS],
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            deadline: Some(Instant::now() + Duration::from_secs(SENTINEL_DEADLINE_SECS)),
+            presolve: false,
+            ..SolverOptions::default()
+        };
+
+        let result = solve_as_lp(&problem, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "huge-wide LP with {SENTINEL_DEADLINE_SECS}s of budget left must be \
+             solved, not minted a fake Timeout: {result:?}"
+        );
+        assert!(
+            (result.objective - SENTINEL_EXPECTED_OBJ).abs() <= SENTINEL_OBJ_TOL,
+            "hand-computed optimum is -1, got {}",
+            result.objective
+        );
+        assert!(
+            !result.stats.deadline_triggered,
+            "a solve that finished inside its deadline must not claim deadline_triggered"
+        );
     }
 
     /// 非負変数の QP/LP を密行で構築するヘルパー (Farkas 検証 sentinel 用)。
