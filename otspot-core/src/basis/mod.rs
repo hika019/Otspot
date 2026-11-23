@@ -61,6 +61,16 @@ pub(crate) struct LuBasis {
     solve_scratch: MemBuffer,
 }
 
+/// 基底 `basis` (列番号は `a` の列を指す) に対する eta nnz バジェット。
+///
+/// `ETA_NNZ_BUDGET_MULTIPLIER × nnz(B)`。下限 `max_etas` は「eta 1 個あたり
+/// nnz 1」を下回る厳しすぎるバジェットを作らないための保険で、正則基底では
+/// nnz(B) ≥ m なので通常発火しない。
+fn eta_nnz_budget(a: &CscMatrix, basis: &[usize], max_etas: usize) -> usize {
+    let nnz_b: usize = basis.iter().map(|&col| a.column(col).0.len()).sum();
+    (nnz_b * eta::ETA_NNZ_BUDGET_MULTIPLIER).max(max_etas)
+}
+
 impl LuBasis {
     #[cfg(test)]
     pub fn new(a: &CscMatrix, basis: &[usize], max_etas: usize) -> Result<Self, SolverError> {
@@ -83,7 +93,10 @@ impl LuBasis {
         let solve_scratch = lu::make_solve_scratch(&lu);
         Ok(Self {
             lu,
-            eta_file: eta::EtaFile::new(effective_max_etas),
+            eta_file: eta::EtaFile::with_budget(
+                effective_max_etas,
+                eta_nnz_budget(a, basis, effective_max_etas),
+            ),
             basis_indices: basis.to_vec(),
             singular_basis: false,
             refactor_failed: false,
@@ -91,7 +104,7 @@ impl LuBasis {
         })
     }
 
-    /// 再因子分解が必要かどうかを返す（eta蓄積数ベース）
+    /// 再因子分解が必要かどうかを返す（eta蓄積数または累積 nnz バジェット）
     pub(crate) fn needs_refactor(&self) -> bool {
         self.eta_file.needs_refactor()
     }
@@ -114,7 +127,8 @@ impl LuBasis {
         match refactor::refactor_timed(a, basis, deadline) {
             Ok(new_lu) => {
                 self.lu = new_lu;
-                self.eta_file.etas.clear();
+                self.eta_file.clear();
+                self.eta_file.nnz_budget = eta_nnz_budget(a, basis, self.eta_file.max_etas);
                 self.basis_indices = basis.to_vec();
             }
             Err(otspot_num::SolverError::SingularBasis { .. }) => {
@@ -144,7 +158,8 @@ impl LuBasis {
             match refactor::refactor_timed(a, basis, deadline) {
                 Ok(new_lu) => {
                     self.lu = new_lu;
-                    self.eta_file.etas.clear();
+                    self.eta_file.clear();
+                    self.eta_file.nnz_budget = eta_nnz_budget(a, basis, self.eta_file.max_etas);
                     self.basis_indices = basis.to_vec();
                 }
                 Err(otspot_num::SolverError::SingularBasis { .. }) => {
@@ -229,7 +244,7 @@ impl BasisManager for LuBasis {
             .ok_or(SolverError::SingularBasis { step: leaving_row })?;
         debug_assert!(pivot.is_finite());
         let eta = eta::add_eta_sparse(pivot_col, leaving_row, pivot);
-        self.eta_file.etas.push(eta);
+        self.eta_file.push_eta(eta);
         self.basis_indices[leaving_row] = entering_col;
         Ok(())
     }
@@ -398,6 +413,51 @@ mod tests {
         let y = rhs_sv2.to_dense();
         let check2 = bt.mat_vec_mul(&y).unwrap();
         assert_vec_near(&check2, &rhs_orig, 1e-10);
+    }
+
+    /// SENTINEL (eta nnz バジェット案): nnz(B) の手計算オラクルに基づくバジェットが
+    /// `update()` 経由の累積で発火し、リファクタ後にカウンタとバジェットが
+    /// 再計算される。個数判定だけの旧実装 (revert 対象) では 24 本 (< max_etas 50)
+    /// で needs_refactor が true にならないため、このテストは fail する。
+    #[test]
+    fn lu_basis_nnz_budget_fires_before_count_and_resets_on_refactor() {
+        // B = A の列 0..3 は全行非零 → nnz(B) = 3+3+3 = 9 (手計算)。
+        // バジェット = 8 × 9 = 72、max_etas = 50。
+        let dense = vec![
+            vec![2.0, 1.0, 0.5, 1.5],
+            vec![1.0, 3.0, 1.0, -2.0],
+            vec![0.7, 1.0, 2.0, 3.0],
+        ];
+        let a = dense_to_csc(&dense, 3, 4);
+        let basis = vec![0, 1, 2];
+        let mut lb = LuBasis::new(&a, &basis, 50).unwrap();
+        assert_eq!(lb.eta_file.nnz_budget, 72, "8 × nnz(B)=9 (hand oracle)");
+
+        // pivot_col の全 3 エントリが |v| > ZERO_TOL → eta あたりの nnz は 3。
+        let pivot_col = SparseVec::from_dense(&[1.0, 2.0, 3.0]);
+        for i in 0..21 {
+            lb.update(3, i % 3, &pivot_col).unwrap();
+            assert!(!lb.needs_refactor(), "must not fire at {} etas", i + 1);
+        }
+        assert_eq!(lb.eta_file.total_nnz, 63);
+        for i in 21..24 {
+            lb.update(3, i % 3, &pivot_col).unwrap();
+        }
+        assert_eq!(lb.eta_file.total_nnz, 72);
+        assert!(
+            lb.needs_refactor(),
+            "24 etas (< max_etas 50) with accumulated nnz 72 >= budget 72 must fire"
+        );
+
+        lb.refactor_if_needed_timed(&a, &basis, None);
+        assert!(!lb.refactor_failed);
+        assert_eq!(lb.eta_count(), 0);
+        assert_eq!(lb.eta_file.total_nnz, 0);
+        assert_eq!(
+            lb.eta_file.nnz_budget, 72,
+            "budget must be recomputed from the refactored basis"
+        );
+        assert!(!lb.needs_refactor());
     }
 
     #[test]

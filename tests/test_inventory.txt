@@ -2,10 +2,12 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3547 testcases, 44 ignored
+# totals: 3550 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
+otspot-core	basis::eta::tests::count_cap_still_bounds_sparse_eta_runs	active
+otspot-core	basis::eta::tests::nnz_budget_triggers_refactor_below_count_cap	active
 otspot-core	basis::eta::tests::test_eta_btran	active
 otspot-core	basis::eta::tests::test_eta_multiple_updates	active
 otspot-core	basis::eta::tests::test_eta_needs_refactor	active
@@ -25,6 +27,7 @@ otspot-core	basis::lu::tests::test_lu_markowitz	active
 otspot-core	basis::lu::tests::test_lu_singular_detection	active
 otspot-core	basis::lu::tests::test_lu_structurally_singular_no_panic	active
 otspot-core	basis::tests::invalid_eta_update_is_rejected_atomically	active
+otspot-core	basis::tests::lu_basis_nnz_budget_fires_before_count_and_resets_on_refactor	active
 otspot-core	basis::tests::test_lu_basis_ftran_btran	active
 otspot-core	basis::tests::test_lu_basis_refactor	active
 otspot-core	basis::tests::test_lu_basis_refactor_after_50_etas	active

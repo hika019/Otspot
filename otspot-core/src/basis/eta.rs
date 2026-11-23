@@ -7,6 +7,17 @@
 use crate::tolerances::*;
 use otspot_num::sparse::SparseVec;
 
+/// nnz バジェットの倍率: リファクタ閾値 = `ETA_NNZ_BUDGET_MULTIPLIER × nnz(B)`。
+///
+/// 個数判定 (`max_etas`) だけでは eta 1 個の nnz (= fill-in を含んだ B⁻¹a_q) に
+/// 上限がなく、最悪ケースの eta 常駐が `max_etas × m × 16B` (インデックス 8B +
+/// 値 8B / nnz) に発散しうる。累積 nnz に nnz(B) の定数倍という上限制限を置く。
+/// 乗数 8 の根拠: 実測したリファクタ直前 Σnnz_eta / nnz(B) 比は健全な疎問題で
+/// ≤ 3.1 (bandm 3.03 / 25fv47 2.78 / 80bau3b 1.42 / n3700 0.60)、fill-heavy な
+/// 問題だけ 13.9 (fome13) と一桁大きい。8 は後者で発火し前者では発火しない
+/// 中間値 (2026-11-24 eta_diag、lp_problems 全件 + fome13 実測)。
+pub(crate) const ETA_NNZ_BUDGET_MULTIPLIER: usize = 8;
+
 /// 単一のイータ行列: `E = I + (col - e_r) * e_r^T`
 ///
 /// `B^{-1}` の1ステップ更新を疎表現で保持する。
@@ -20,26 +31,56 @@ pub(crate) struct EtaMatrix {
 
 /// 最後の再因子分解以降に蓄積されたイータ行列の集合
 ///
-/// イータ行列が `max_etas` 個に達すると [`needs_refactor`] が `true` を返し、
-/// 完全再因子分解のタイミングを通知する。
+/// リファクタ判定は2つの上限の OR:
+/// - 個数: イータ行列が `max_etas` 個に到達
+/// - 累積 nnz バジェット: 蓄積 nnz が `nnz_budget` (= 倍率 × nnz(B)) に到達
+///
+/// 後者は fill-in の大きい基底での eta 常駐を nnz(B) の定数倍に抑えるための
+/// 上限制限。[`needs_refactor`] が `true` を返すと完全再因子分解のタイミング。
 ///
 /// [`needs_refactor`]: EtaFile::needs_refactor
 #[derive(Debug, Clone)]
 pub(crate) struct EtaFile {
     pub etas: Vec<EtaMatrix>,
     pub max_etas: usize,
+    /// 前回リファクタ以降の累積 eta nnz。[`push_eta`] 経由での追加分のみ計上。
+    pub total_nnz: usize,
+    /// 累積 nnz の上限。`usize::MAX` で無効 (個数判定のみ)。
+    pub nnz_budget: usize,
 }
 
 impl EtaFile {
+    /// 個数判定専用のファイル (バジェット無効)。production の基底管理は
+    /// 必ず nnz バジェット付き [`with_budget`] を使うため、テスト専用。
+    #[cfg(test)]
     pub fn new(max_etas: usize) -> Self {
+        Self::with_budget(max_etas, usize::MAX)
+    }
+
+    pub fn with_budget(max_etas: usize, nnz_budget: usize) -> Self {
         Self {
             etas: Vec::new(),
             max_etas,
+            total_nnz: 0,
+            nnz_budget,
         }
     }
 
+    /// イータを追加し、その nnz をバジェットカウンタに計上する。
+    /// バジェット判定を使う経路は必ずこの経由で追加すること。
+    pub fn push_eta(&mut self, eta: EtaMatrix) {
+        self.total_nnz += eta.indices.len();
+        self.etas.push(eta);
+    }
+
+    /// 蓄積イータと nnz カウンタをリセットする (リファクタ成功時)。
+    pub fn clear(&mut self) {
+        self.etas.clear();
+        self.total_nnz = 0;
+    }
+
     pub fn needs_refactor(&self) -> bool {
-        self.etas.len() >= self.max_etas
+        self.etas.len() >= self.max_etas || self.total_nnz >= self.nnz_budget
     }
 }
 
@@ -234,6 +275,45 @@ mod tests {
         assert!(!ef.needs_refactor());
         ef.etas.push(add_eta(&[1.0], 0));
         assert!(ef.needs_refactor());
+    }
+
+    /// SENTINEL (eta nnz バジェット案): 個数上限 (`max_etas`) に遠く届かない本数でも、
+    /// 累積 nnz がバジェットに到達すればリファクタが発火する。個数判定だけの
+    /// 旧実装 (revert 対象) ではこの発火は起きず、本テストは fail する。
+    #[test]
+    fn nnz_budget_triggers_refactor_below_count_cap() {
+        // nnz 6 の eta を 1 本ずつ push_eta 経由で追加する。
+        // pivot_col は index 0..6 すべて |v| > ZERO_TOL → eta の nnz はちょうど 6。
+        let make_eta = |r: usize| add_eta(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], r % 6);
+        let mut ef = EtaFile::with_budget(100, 50);
+        for i in 0..8 {
+            ef.push_eta(make_eta(i));
+            // 累積 nnz = 6×(i+1) ≤ 48 < 50 かつ本数 ≤ 8 < 100 → 発火しない。
+            assert!(!ef.needs_refactor(), "must not fire at {} etas", i + 1);
+        }
+        assert_eq!(ef.total_nnz, 48);
+        ef.push_eta(make_eta(8)); // 累積 54 ≥ 50
+        assert_eq!(ef.total_nnz, 54);
+        assert!(
+            ef.needs_refactor(),
+            "accumulated nnz 54 >= budget 50 must trigger refactor at count 9 << max_etas 100"
+        );
+        ef.clear();
+        assert_eq!(ef.total_nnz, 0);
+        assert!(!ef.needs_refactor());
+    }
+
+    /// 個数上限は稀疏な eta 列に対する後方互換の上限として残り続ける
+    /// (バジェットが未達でも `max_etas` 到達で発火)。
+    #[test]
+    fn count_cap_still_bounds_sparse_eta_runs() {
+        let mut ef = EtaFile::with_budget(3, 1_000_000);
+        ef.push_eta(add_eta(&[1.0], 0));
+        ef.push_eta(add_eta(&[1.0], 0));
+        assert!(!ef.needs_refactor());
+        ef.push_eta(add_eta(&[1.0], 0));
+        assert!(ef.needs_refactor());
+        assert_eq!(ef.total_nnz, 3, "push_eta must account every eta's nnz");
     }
 
     #[test]
