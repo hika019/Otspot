@@ -236,9 +236,9 @@ threads-required = "num-cpus"
 # wall-deadline guard と同じ専有指定で fair timing を確保する。cap 12s 自体を
 # 上げるのは presolve の deadline leak 隠蔽なので禁止 (無チェック pass の粒度側は
 # fix/presolve-deadline-granularity 側で対応)。
-# test() はバイナリ名に一致せず、integration test の binary_id は
-# <pkg>::<target> 完全形が必要なので binary_id + & で対象を限定する。
+# 同名テストの取り違えを防ぐため binary + & で対象を限定する
+# (docs consistency gate が認める support 済み sub 集は test/binary・=・+・&)。
 [[profile.heavy.overrides]]
-filter = "binary_id(otspot::diag_qp_deadline_lasso) & test(=qp_is_lasso_300_real_data_honors_deadline)"
+filter = "binary(diag_qp_deadline_lasso) & test(=qp_is_lasso_300_real_data_honors_deadline)"
 threads-required = "num-cpus"
 
