@@ -14,7 +14,7 @@ otspot-core/src/simplex/dual.rs	dual_simplex_core	227	226
 otspot-core/src/simplex/dual_advanced/bounded_core/iterate.rs	iterate	149	458
 otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	phase2_primal_bounded	137	293
 otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	primal_simplex_aug	532	293
-otspot-core/src/simplex/dual_advanced/core.rs	dual_simplex_core_advanced	282	581
+otspot-core/src/simplex/dual_advanced/core.rs	dual_simplex_core_advanced	304	581
 otspot-core/src/simplex/dual_advanced/phase1.rs	big_m_cold_start	638	419
 otspot-core/src/simplex/entry.rs	solve_with	79	291
 otspot-core/src/simplex/primal/core.rs	revised_simplex_core	153	629
