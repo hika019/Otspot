@@ -41,6 +41,44 @@ fn test_record_phase2_step_executed() {
     }
 }
 
+// Test-only observability for the mid-loop stop checks inside
+// `equality_constraint_qr`: counts every work item its row-scan / grouping /
+// Le-Le pair-test passes examine (one per scanned column, per grouped row, per
+// pair-tested candidate row) and flips `QR_CANCEL_SIGNAL` once the configured
+// target is reached. Entirely `#[cfg(test)]`, mirroring the
+// `PHASE2_*`/step8 mechanisms, giving the sentinels a deterministic
+// (work-count based, not wall-clock) stand-in for a real cancel/deadline race.
+#[cfg(test)]
+thread_local! {
+    static QR_ROWS_EXAMINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static QR_CANCEL_AFTER_ROWS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static QR_CANCEL_SIGNAL: std::sync::Arc<AtomicBool> = std::sync::Arc::new(AtomicBool::new(false));
+}
+
+#[cfg(test)]
+fn test_record_qr_row_examined() {
+    let examined = QR_ROWS_EXAMINED.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if QR_CANCEL_AFTER_ROWS.with(std::cell::Cell::get) == Some(examined) {
+        QR_CANCEL_SIGNAL.with(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    }
+}
+
+/// Stop (cancel flag or deadline) is honored once per examined work item of
+/// `equality_constraint_qr`'s three row passes, so the post-stop work leak is
+/// one row. The pair-test loop is the unbounded one -- O(Σ bucket²) candidate
+/// comparisons before its first existing check -- and at step8's measured
+/// rate for bucket-shaped row scans on IS_LASSO_300-class data (~0.24ms per
+/// row against a 2240-row bucket) a per-row `Instant::now()` adds < 0.1% step
+/// overhead while bounding the leak to ~1ms; sampling every K rows would
+/// reintroduce a K-row leak for no measurable gain at that rate.
+#[inline]
+fn qr_stop_requested(opts: &SolverOptions) -> bool {
+    opts.external_stop_requested()
+}
+
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
 /// Elimination cost is O(mn²) and only pays off in strongly over-determined
 /// systems (m > n * ROW_OVERDETERMINED_RATIO).
@@ -103,6 +141,17 @@ fn equality_constraint_qr(
     // Restrict pair detection to Le rows; pairing Eq/Ge rows with Le would corrupt the problem.
     let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
     for j in 0..n {
+        // See `qr_stop_requested`: these three passes (scan, grouping, pair
+        // test) run before the elimination loop's own stop check, and the
+        // pair test is O(Σ bucket²) -- unbounded relative to a deadline that
+        // expires mid-pass (the same shape as step8's bucket leak; see
+        // `step8_stop_requested`'s derivation). Leak bound after a stop: one
+        // work item.
+        #[cfg(test)]
+        test_record_qr_row_examined();
+        if qr_stop_requested(opts) {
+            return true;
+        }
         let start = prob.a.col_ptr()[j];
         let end = prob.a.col_ptr()[j + 1];
         for k in start..end {
@@ -134,6 +183,11 @@ fn equality_constraint_qr(
     // consistency check flags — vary across runs of identical input.
     let mut groups: BTreeMap<(usize, u64, i64), Vec<usize>> = BTreeMap::new();
     for i in 0..m {
+        #[cfg(test)]
+        test_record_qr_row_examined();
+        if qr_stop_requested(opts) {
+            return true;
+        }
         if removed_rows[i] || row_entries[i].is_empty() {
             continue;
         }
@@ -151,6 +205,11 @@ fn equality_constraint_qr(
 
     for group in groups.values() {
         for &i in group {
+            #[cfg(test)]
+            test_record_qr_row_examined();
+            if qr_stop_requested(opts) {
+                return true;
+            }
             if paired[i] {
                 continue;
             }
@@ -359,14 +418,15 @@ fn constraint_precond(a: &mut CscMatrix, b: &mut [f64]) -> Vec<f64> {
 }
 
 /// Runs `work`, honoring cancellation both before and after -- not just
-/// before. `equality_constraint_qr` has checkless fast paths (the top-level
-/// size-guard skip, and the `m_eq == 0` early return after its row-scan/
-/// pairing pass finds nothing to eliminate) that can still cost real time on
-/// a large QP without ever consulting `cancel_flag` internally. Checking only
-/// beforehand would let a cancellation requested *during* one of those
-/// checkless paths go unnoticed until the caller's next unrelated check (or
-/// never, if there isn't one) -- Python's `Model.solve()` signal-poll loop
-/// stays blocked in `handle.join()` for all of that.
+/// before. The remaining `work` closures are single O(problem-size) passes
+/// (q clone, CSC rebuild, preconditioning, `QpProblem::new`), so checking
+/// before/after bounds the post-stop leak to one such pass; the one pass
+/// whose cost is unbounded relative to problem size -- `equality_constraint_qr`'s
+/// Le-Le pair test -- now checks the stop internally per row (see
+/// `qr_stop_requested`). Checking only beforehand would let a cancellation
+/// requested *during* a pass go unnoticed until the caller's next unrelated
+/// check (or never, if there isn't one) -- Python's `Model.solve()`
+/// signal-poll loop stays blocked in `handle.join()` for all of that.
 fn cancellable<T>(opts: &SolverOptions, work: impl FnOnce() -> T) -> Option<T> {
     if opts.external_stop_requested() {
         return None;
@@ -875,9 +935,9 @@ mod tests {
 
     /// `cancellable` must not treat "cancellation wasn't requested before
     /// `work` started" as sufficient -- `work` itself may be the thing that
-    /// makes cancellation true (standing in for `equality_constraint_qr`'s
-    /// checkless fast paths, where real wall-clock time passes between the
-    /// entry check and the moment the caller finds out). A side-effecting
+    /// makes cancellation true (standing in for any long `work` closure,
+    /// where real wall-clock time passes between the entry check and the
+    /// moment the caller finds out). A side-effecting
     /// closure makes this deterministic: no thread, no timing, no race --
     /// reverting the post-`work` check back out (leaving only the entry
     /// check) makes this assert `Some(42)` instead, since nothing before
@@ -1554,5 +1614,139 @@ mod tests {
                     .sum::<f64>();
             assert!((objective - (-3.0 * scale)).abs() <= scale * 1e-12);
         }
+    }
+}
+
+#[cfg(test)]
+mod qr_stop_sentinels {
+    //! Deterministic (work-count, not wall-clock) sentinels for the per-item
+    //! stop checks in `equality_constraint_qr`'s scan / grouping / pair-test
+    //! passes. Before this fix those passes only ran under `cancellable`'s
+    //! before/after wrapper, so a stop arriving mid-pass went unnoticed until
+    //! the pass (and, for the O(Σ bucket²) pair test, all its buckets) ended
+    //! -- the same unbounded-leak shape `cancellable`'s doc called out as the
+    //! deadline-overshoot bound (`qp_is_lasso_300_real_data_honors_deadline`).
+    use super::*;
+    use otspot_num::sparse::CscMatrix;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    /// All 120 rows sit in one Le-Le bucket ((2 nnz, {x0,x1}-pattern, |b|=1));
+    /// four of them form two exact pairs at the very end of the bucket order:
+    /// rows 116/117 (`x+y=1` vs `-(x+y)=-1` with equal b, pair kept) and rows
+    /// 118/119 (identical coefficients and RHS to 116/117, so 118's equality
+    /// is implied by 116's and both 118 and its partner 119 drop).
+    ///
+    /// Independent oracle (hand elimination, mirroring the function's own
+    /// procedure): both pairs give `eq_pos_rows = [116, 118]` with RHS
+    /// (1, 1); col 0 pivots on row 116 (tie), row 118 annihilates exactly
+    /// (`b_work = 1 - 1·1 = 0` ≤ tol) → drop 118 + partner 119; pivot 116 and
+    /// its partner 117 stay. The 116 filler rows have b = +1 with per-row
+    /// distinct coefficients, so the `b_i + b_j ≈ 0` filter only ever lets
+    /// them meet rows 117/119 and `is_neg` rejects them; no filler pairs.
+    const M: usize = 120;
+    const N: usize = 2;
+    /// Work items a full pass examines: one per scanned column, per grouped
+    /// row, per pair-tested candidate row.
+    const FULL_ITEMS: usize = N + 2 * M;
+
+    fn single_bucket_fixture() -> QpProblem {
+        let mut a_rows = Vec::new();
+        let mut a_cols = Vec::new();
+        let mut a_vals = Vec::new();
+        let mut b = vec![0.0f64; M];
+        for i in 0..M {
+            let (v0, v1, rhs) = match i {
+                116 | 118 => (2.0f64, 3.0f64, 1.0f64),
+                117 | 119 => (-2.0f64, -3.0f64, -1.0f64),
+                _ => (3.0 + 0.01 * (i as f64), 4.0 + 0.01 * (i as f64), 1.0f64),
+            };
+            a_rows.extend_from_slice(&[i, i]);
+            a_cols.extend_from_slice(&[0, 1]);
+            a_vals.extend_from_slice(&[v0, v1]);
+            b[i] = rhs;
+        }
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, M, N).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], N, N).unwrap();
+        QpProblem::new_all_le(
+            q,
+            vec![0.0; N],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); N],
+        )
+        .unwrap()
+    }
+
+    fn reset(cancel_after: Option<usize>) -> Arc<std::sync::atomic::AtomicBool> {
+        QR_ROWS_EXAMINED.with(|c| c.set(0));
+        QR_CANCEL_AFTER_ROWS.with(|c| c.set(cancel_after));
+        QR_CANCEL_SIGNAL.with(|flag| {
+            flag.store(false, Ordering::Relaxed);
+            Arc::clone(flag)
+        })
+    }
+
+    fn examined() -> usize {
+        QR_ROWS_EXAMINED.with(|c| c.get())
+    }
+
+    fn run(prob: &QpProblem, cancel_after: Option<usize>) -> (bool, Vec<usize>) {
+        let signal = reset(cancel_after);
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::clone(&signal)),
+            ..SolverOptions::default()
+        };
+        let mut removed_rows = vec![false; prob.num_constraints];
+        let consistent = equality_constraint_qr(prob, &mut removed_rows, &opts);
+        let removed = (0..M).filter(|&i| removed_rows[i]).collect::<Vec<_>>();
+        (consistent, removed)
+    }
+
+    #[test]
+    fn qr_per_item_stop_checks_bound_the_pre_elimination_leak() {
+        let prob = single_bucket_fixture();
+        // Premise (uncancelled): the duplicate pair drops, all passes run.
+        let (consistent, removed) = run(&prob, None);
+        assert!(consistent, "fixture is consistent");
+        assert_eq!(
+            removed,
+            vec![118, 119],
+            "hand-oracle: only the duplicate equality and its partner drop"
+        );
+        assert_eq!(examined(), FULL_ITEMS, "uncancelled run examines all");
+
+        // Stop during the column scan. Sentinel: reverting the scan-loop
+        // check defers the stop to the grouping loop's first row (item 2),
+        // so `examined == 1` fails.
+        let (consistent, removed) = run(&prob, Some(1));
+        assert!(consistent, "a stop proves nothing, not infeasibility");
+        assert_eq!(examined(), 1, "scan must honor the stop immediately");
+        assert!(removed.is_empty(), "nothing removed once stopped");
+
+        // Stop during grouping (scan examined N items; row 1 is item N+1...
+        // N+2 flips at item 3, i.e. the second grouped row).
+        // Sentinel: reverting the grouping check defers to the pair test's
+        // first candidate (item N+M+1), so `examined == 3` fails.
+        let (consistent, removed) = run(&prob, Some(N + 1));
+        assert!(consistent);
+        assert_eq!(examined(), N + 1, "grouping must honor the stop there");
+        assert!(removed.is_empty());
+
+        // Stop 10 rows into the pair-test pass, long before the real pairs at
+        // candidate positions 116/118. Sentinel (the actual leak shape):
+        // reverting the pair-test check lets all buckets run to completion,
+        // so `examined` becomes FULL_ITEMS and `removed` [118, 119].
+        let (consistent, removed) = run(&prob, Some(N + M + 10));
+        assert!(consistent);
+        assert_eq!(
+            examined(),
+            N + M + 10,
+            "the pair-test pass must honor the stop at the row it flips on, \
+             not finish the bucket"
+        );
+        assert!(removed.is_empty(), "pairs never reached once stopped");
+
+        reset(None);
     }
 }

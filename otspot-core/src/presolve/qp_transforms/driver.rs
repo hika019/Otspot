@@ -99,7 +99,7 @@ pub fn run_qp_presolve_phase1(prob: &QpProblem, opts: &SolverOptions) -> QpPreso
         run_or_stop!(step4_empty(prob, &mut ws));
         run_or_stop!(step5_redundant(prob, &mut ws));
         run_or_stop!(step7_free_var(prob, &mut ws, deadline));
-        run_or_stop!(step8_parallel_row(prob, &mut ws, deadline));
+        run_or_stop!(step8_parallel_row(prob, &mut ws, opts));
         run_or_stop!(step10_implied_bounds(prob, &mut ws, deadline));
         run_or_stop!(step11_dual_fixing(prob, &mut ws));
         run_or_stop!(step12_redundant_final(prob, &mut ws));

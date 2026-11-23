@@ -352,7 +352,10 @@ fn step8_parallel_le_drops_looser_row() {
         vec![ConstraintType::Le, ConstraintType::Le],
     );
     let mut ws = Workspace::from_problem(&prob);
-    expect_ok(step8_parallel_row(&prob, &mut ws, None), "step8 ok");
+    expect_ok(
+        step8_parallel_row(&prob, &mut ws, &SolverOptions::default()),
+        "step8 ok",
+    );
     let removed: Vec<usize> = (0..2).filter(|&i| ws.removed_rows[i]).collect();
     assert_eq!(removed.len(), 1, "exactly one parallel row removed");
     assert_eq!(
@@ -379,7 +382,10 @@ fn step8_parallel_eq_same_b_removes_second() {
         vec![ConstraintType::Eq, ConstraintType::Eq],
     );
     let mut ws = Workspace::from_problem(&prob);
-    expect_ok(step8_parallel_row(&prob, &mut ws, None), "step8 ok");
+    expect_ok(
+        step8_parallel_row(&prob, &mut ws, &SolverOptions::default()),
+        "step8 ok",
+    );
     assert!(
         ws.removed_rows[0] ^ ws.removed_rows[1],
         "exactly one row removed"
@@ -404,7 +410,7 @@ fn step8_parallel_eq_inconsistent_is_infeasible() {
         vec![ConstraintType::Eq, ConstraintType::Eq],
     );
     let mut ws = Workspace::from_problem(&prob);
-    let res = step8_parallel_row(&prob, &mut ws, None);
+    let res = step8_parallel_row(&prob, &mut ws, &SolverOptions::default());
     assert!(
         res.is_err(),
         "inconsistent parallel Eq pair must be Infeasible"
@@ -429,7 +435,10 @@ fn step8_non_parallel_rows_untouched() {
         vec![ConstraintType::Le, ConstraintType::Le],
     );
     let mut ws = Workspace::from_problem(&prob);
-    expect_ok(step8_parallel_row(&prob, &mut ws, None), "step8 ok");
+    expect_ok(
+        step8_parallel_row(&prob, &mut ws, &SolverOptions::default()),
+        "step8 ok",
+    );
     assert!(!ws.removed_rows[0] && !ws.removed_rows[1]);
 }
 
