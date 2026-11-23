@@ -226,3 +226,19 @@ filter = "test(=lp_route_dfl001_uses_ipm_dispatch) + test(=lp_route_ken18_uses_i
 slow-timeout = { period = "300s", terminate-after = 4 }
 threads-required = "num-cpus"
 
+# qp_is_lasso_300_real_data_honors_deadline: wall assert (budget 10s + slack 2s
+# = 12s cap) に対して CPU 専有が無く、heavy の他 tier-2 sentinel と contention 化
+# して拉伸される。main push run 45126657012 (69d6655e) で wall=12.991s > 12s FAIL、
+# ところが git diff がゼロの同一ツリー (d6001261) は 49 分前の run 45121166226 で
+# PASS — code 依存でなく contention 依存であることが same-tree PASS/FAIL ペアで
+# 実証された。idle solo では 10.0〜11.6s に収まり余白 0.5s 未満しか無い
+# (klein3 1.33x / greenbea 1.6x と同型の薄マージン)。同 profile の他の
+# wall-deadline guard と同じ専有指定で fair timing を確保する。cap 12s 自体を
+# 上げるのは presolve の deadline leak 隠蔽なので禁止 (無チェック pass の粒度側は
+# fix/presolve-deadline-granularity 側で対応)。
+# test() はバイナリ名に一致せず、integration test の binary_id は
+# <pkg>::<target> 完全形が必要なので binary_id + & で対象を限定する。
+[[profile.heavy.overrides]]
+filter = "binary_id(otspot::diag_qp_deadline_lasso) & test(=qp_is_lasso_300_real_data_honors_deadline)"
+threads-required = "num-cpus"
+
