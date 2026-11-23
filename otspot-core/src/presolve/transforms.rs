@@ -32,5 +32,7 @@ mod tests;
 mod tests_per_step;
 
 pub use driver::{run_presolve, run_presolve_with_flags};
+#[cfg(test)]
+pub(crate) use state::count_rebuild_scratch_entry;
 pub(crate) use state::{PostsolveStep, PresolveState};
 pub use state::{PresolveFlags, PresolveResult, PresolveStatus};
