@@ -3,37 +3,53 @@
 # with source=otspot_self are Otspot's own solutions (regression baseline,
 # NOT independently verified optima).
 # problem_type is the measured parse result (otspot-io::cbf): SOCP/MISOCP for
-# bridged instances, EXP/PSD for cones outside the SOCP bridge's scope.
-# Run conditions: examples/solve_cbf.rs, ConicOptions{tol=1e-6, max_iter=100},
-#   BbOptions{int_tol=1e-6, max_nodes=20000, gap_tol=1e-6}, external timeout
-#   180s/problem, 14GB address-space cap, sequential, release, 2026-07-04.
+# bridged instances, EXP/PSD for cones outside the SOCP bridge's scope
+# (re-verified at this HEAD: 2x{3,4,5}_3bars reject on "PSDCON", syn{10,15,
+# 20}m on cone type "EXP").
+# Run conditions: examples/solve_cbf.rs --eps 1e-6 (sets ConicOptions.tol and
+#   BbOptions.gap_tol; ConicOptions.max_iter=5000 and BbOptions{int_tol=1e-6,
+#   max_nodes=20000} are the code defaults at this HEAD - the old header's
+#   max_iter=100 predates DEFAULT_CONIC_MAX_ITER), external wall timeout
+#   1000s/problem (timeout -k 5), sequential jobs=1, no memory cap (worst
+#   measured peak RSS: 167.1 MiB on 2D-TopOpt-Cantilever_60x40_50; no
+#   oom-kill observed), release build with feature parallel, binary sha256
+#   198f8373af6fdf5eed58e84ad8ef48591d86549ee6dfbba20d7f61ffe3c345f3 at
+#   b49d2121, two full passes on 2026-11-23; an objective is recorded only
+#   when both passes agree digit-for-digit (evidence:
+#   ~/.cache/otspot-socp-evidence-20261123).
 # Status values recorded in optimal_obj for unsolved rows:
 #   unsupported         = EXP/PSD cone rejected by the bridge (by design)
-#   oom_abort           = allocation failure in the dense conic-IPM KKT
-#   external_timeout    = killed by the 180s external timeout
+#   external_timeout    = killed by the 1000s external wall timeout
+#   suboptimal:<obj>    = B&B incumbent the solver did NOT certify optimal
+#                         (max_nodes or gap not proven); reference only, the
+#                         value is not an optimal baseline
 #   infeasible_reported = solver returned Infeasible without a certificate
-#                         (false-infeasible suspect: NaN-diverged root node)
-#
+#                         (not observed at this HEAD; kept for compare.py
+#                         vocabulary compatibility)
+# The 2026-07-04 run this replaces recorded oom_abort for the _w family and
+# 2D-TopOpt; at this HEAD those problems run within the peak RSS above and
+# hit the external timeout instead (sparse conic path; dense-era numbers do
+# not reproduce). oom_abort is no longer observed anywhere in this suite.
 problem_name,optimal_obj,problem_type,source
-chainsing-1000-1,external_timeout,SOCP,otspot_self
-nql30,external_timeout,SOCP,otspot_self
-nql60,external_timeout,SOCP,otspot_self
-qssp30,external_timeout,SOCP,otspot_self
+100_0_1_w,external_timeout,MISOCP,otspot_self
+150_0_1_w,external_timeout,MISOCP,otspot_self
+200_0_1_w,external_timeout,MISOCP,otspot_self
 20_0_1_w,external_timeout,MISOCP,otspot_self
 20_0_2_w,external_timeout,MISOCP,otspot_self
-50_0_1_w,oom_abort,MISOCP,otspot_self
-50_0_2_w,oom_abort,MISOCP,otspot_self
-100_0_1_w,oom_abort,MISOCP,otspot_self
-150_0_1_w,oom_abort,MISOCP,otspot_self
-200_0_1_w,oom_abort,MISOCP,otspot_self
+2D-TopOpt-Cantilever_60x40_50,external_timeout,MISOCP,otspot_self
 2x3_3bars,unsupported,PSD,otspot_self
 2x4_3bars,unsupported,PSD,otspot_self
 2x5_3bars,unsupported,PSD,otspot_self
-2D-TopOpt-Cantilever_60x40_50,oom_abort,MISOCP,otspot_self
-sssd-strong-15-4,infeasible_reported,MISOCP,otspot_self
-sssd-strong-20-4,infeasible_reported,MISOCP,otspot_self
+50_0_1_w,external_timeout,MISOCP,otspot_self
+50_0_2_w,external_timeout,MISOCP,otspot_self
+chainsing-1000-1,3.0180167109e1,SOCP,otspot_self
+classical_20_0,-8.2295150625e-2,MISOCP,otspot_self
+classical_30_0,-7.9814490911e-2,MISOCP,otspot_self
+nql30,-9.4602847386e-1,SOCP,otspot_self
+nql60,-9.3505285040e-1,SOCP,otspot_self
+qssp30,-6.4966732420e0,SOCP,otspot_self
+sssd-strong-15-4,suboptimal:3.2810079014e5,MISOCP,otspot_self
+sssd-strong-20-4,suboptimal:2.8781046814e5,MISOCP,otspot_self
 syn10m,unsupported,EXP,otspot_self
 syn15m,unsupported,EXP,otspot_self
 syn20m,unsupported,EXP,otspot_self
-classical_20_0,-8.2295151489e-2,MISOCP,otspot_self
-classical_30_0,-7.9814493180e-2,MISOCP,otspot_self
