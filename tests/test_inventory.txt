@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3545 testcases, 44 ignored
+# totals: 3547 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -2300,6 +2300,7 @@ otspot-io	mps::parser::tests::build_lp_problem_rejects_missing_value_for_li_boun
 otspot-io	mps::parser::tests::build_lp_problem_rejects_missing_value_for_lo_bound	active
 otspot-io	mps::parser::tests::build_lp_problem_rejects_missing_value_for_ui_bound	active
 otspot-io	mps::parser::tests::build_lp_problem_rejects_missing_value_for_up_bound	active
+otspot-io	mps::parser::tests::parse_retention_independent_of_name_length	active
 otspot-io	mps::tests::bva_mps_bounds_fx_fr_lo_up	active
 otspot-io	mps::tests::bva_mps_rhs_zero	active
 otspot-io	mps::tests::dt_mps_2var_le_ge_eq_matrix_structure	active
@@ -2474,6 +2475,7 @@ otspot-io	qps::parser::tests::build_qp_problem_accepts_valueless_bound_types	act
 otspot-io	qps::parser::tests::build_qp_problem_rejects_missing_value_for_fx_bound	active
 otspot-io	qps::parser::tests::build_qp_problem_rejects_missing_value_for_lo_bound	active
 otspot-io	qps::parser::tests::build_qp_problem_rejects_missing_value_for_up_bound	active
+otspot-io	qps::parser::tests::parse_retention_independent_of_name_length	active
 otspot-io	qps::tests::dt_qps_ge_eq_row_types	active
 otspot-io	qps::tests::ep_qps_2var_quadobj_structure	active
 otspot-io	qps::tests::test_e226_objective_constant_is_negated_rhs	active
