@@ -576,12 +576,23 @@ fn solve_without_presolve_inner(problem: &LpProblem, options: &SolverOptions) ->
     };
 
     let result = match options.simplex_method {
-        SimplexMethod::Primal => two_phase_simplex(&sf, problem, options),
+        SimplexMethod::Primal => match super::legacy_scale_triple(&sf, options) {
+            Some(triple) => two_phase_simplex(
+                &sf, problem, options, &triple.0, &triple.1, &triple.2, &triple.3, &triple.4,
+            ),
+            None => SolverResult {
+                status: SolveStatus::Timeout,
+                objective: f64::INFINITY,
+                ..Default::default()
+            },
+        },
         SimplexMethod::Dual => dual::two_phase_dual_simplex(&sf, problem, options),
         SimplexMethod::DualAdvanced | SimplexMethod::Auto => {
-            // Auto uses dual_advanced; it falls back to two_phase_dual_simplex
-            // internally for problems with Ge/Eq constraints.
-            dual_advanced::solve_dual_advanced(&sf, problem, options)
+            // Auto uses dual_advanced; it falls back internally for Ge/Eq
+            // constraints. This arm hands the standard form over by value:
+            // the Ge chain consumes it and can release the matrix before the
+            // iteration window (see `solve_dual_advanced`).
+            dual_advanced::solve_dual_advanced(sf, problem, options)
         }
     };
     guard_lp_optimal(result, problem)
