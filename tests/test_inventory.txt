@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3546 testcases, 44 ignored
+# totals: 3547 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1419,6 +1419,7 @@ otspot-core	qp::lp_dispatch::tests::farkas_false_on_empty_constraints	active
 otspot-core	qp::lp_dispatch::tests::farkas_false_on_non_nonneg_bounds	active
 otspot-core	qp::lp_dispatch::tests::farkas_rejects_large_magnitude_feasible	active
 otspot-core	qp::lp_dispatch::tests::farkas_rejects_modest_feasible	active
+otspot-core	qp::lp_dispatch::tests::huge_wide_lp_solves_when_deadline_has_slack	active
 otspot-core	qp::lp_dispatch::tests::infeasible_lp_dispatch_obj_offset_not_added	active
 otspot-core	qp::lp_dispatch::tests::large_lp_dispatch_stays_on_simplex_path	active
 otspot-core	qp::lp_dispatch::tests::lp_ipm_core_deadline_reserves_crossover_budget	active
