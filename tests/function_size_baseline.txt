@@ -1,7 +1,7 @@
 # functions over 220 lines; growth is forbidden, shrink/removal is allowed
 otspot-core/src/conic/ipm.rs	solve	172	328
-otspot-core/src/conic/misocp.rs	solve_misocp	455	262
-otspot-core/src/conic/nonconvex.rs	global_core	1997	361
+otspot-core/src/conic/misocp.rs	solve_misocp	456	262
+otspot-core/src/conic/nonconvex.rs	global_core	1998	361
 otspot-core/src/presolve/activity.rs	propagate_row_bounds	81	227
 otspot-core/src/presolve/postsolve.rs	run_postsolve	249	235
 otspot-core/src/qp/ipm_core/ippmm/iter.rs	solve_ippmm_inner_confined	118	721
@@ -16,7 +16,7 @@ otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	phase2_primal_bound
 otspot-core/src/simplex/dual_advanced/bounded_core/primal.rs	primal_simplex_aug	532	293
 otspot-core/src/simplex/dual_advanced/core.rs	dual_simplex_core_advanced	304	581
 otspot-core/src/simplex/dual_advanced/phase1.rs	big_m_cold_start	638	419
-otspot-core/src/simplex/entry.rs	solve_with	79	291
+otspot-core/src/simplex/entry.rs	solve_with	79	268
 otspot-core/src/simplex/primal/core.rs	revised_simplex_core	153	629
 otspot-core/src/simplex/primal/crossover.rs	crossover_dual_from_primal	135	427
 otspot-core/src/simplex/primal/reconcile.rs	pivot_out_degenerate_artificials	222	294

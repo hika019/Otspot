@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3548 testcases, 44 ignored
+# totals: 3567 testcases, 46 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -110,6 +110,17 @@ otspot-core	conic::nonconvex::tests::verified_ray_with_seed_returns_unbounded	ac
 otspot-core	conic::nonconvex::tests::warm_basis_extension_consumes_dual_advanced_resolves	active
 otspot-core	conic::nonconvex::tests::zero_feas_tol_budget_still_certifies_rule2_constraint_row_optimum	active
 otspot-core	conic::nonconvex::tests::zero_global_budgets_still_certify_objective_rule2_optimum	active
+otspot-core	conic::presolve::tests::bound_conflict_emits_verified_farkas_pair	active
+otspot-core	conic::presolve::tests::conflicting_equalities_solve_infeasible_via_ipm	active
+otspot-core	conic::presolve::tests::duplicate_domain_row_absorbed_without_semantic_change	active
+otspot-core	conic::presolve::tests::equality_fixing_recovers_hand_computed_optimum	active
+otspot-core	conic::presolve::tests::fabricated_reduced_solution_is_rejected_by_gate	active
+otspot-core	conic::presolve::tests::kkt_dim_formula	active
+otspot-core	conic::presolve::tests::nothing_to_reduce_declines	active
+otspot-core	conic::presolve::tests::routing_gate_decision_table_matches_measured_band	active
+otspot-core	conic::presolve::tests::substitution_dual_chain_matches_hand_computed	active
+otspot-core	conic::presolve::tests::tightened_tol_formula	active
+otspot-core	conic::presolve::tests::unbounded_ray_maps_to_original_space	active
 otspot-core	conic::qcqp::tests::qcqp_rejects_objective_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_bridge_rejects_base_dimension_mismatch	active
 otspot-core	conic::qcqp::tests::qp_objective_upper_triangle_is_symmetrized_for_cholesky	active
@@ -140,6 +151,7 @@ otspot-core	conic::qcqp_fbbt::tests::rows_with_offdiag_entries_are_skipped_entir
 otspot-core	conic::qcqp_fbbt::tests::tangent_clamp_survives_accumulated_roundoff	active
 otspot-core	conic::qcqp_fbbt::tests::tangent_clamps_to_point_bound	active
 otspot-core	conic::tests::bench_conic_suite	ignored
+otspot-core	conic::tests::cancel_before_solve_prefers_timeout_over_presolve_proved_infeasible	active
 otspot-core	conic::tests::cancel_race_before_misocp_final_infeasible_classification_prefers_timeout	active
 otspot-core	conic::tests::cancel_race_before_misocp_optimal_classification_prefers_timeout	active
 otspot-core	conic::tests::cancel_race_before_misocp_unbounded_return_prefers_timeout	active
@@ -2950,6 +2962,13 @@ otspot::cert_phase1_sentinel	prove_optimal_rejects_negated_z_ub_box_qp	active
 otspot::cert_phase1_sentinel	prove_optimal_rejects_scaled_primal_hs21	active
 otspot::clarabel_cross_check	liswet_family_honest_no_false_optimal	active
 otspot::clarabel_cross_check	test_simple_2var_qp_matches_clarabel	active
+otspot::conic_presolve_cblib_dims	cblib_reduced_kkt_dims_match_predicted_band	active
+otspot::conic_presolve_cblib_dims	cblib_reduced_problems_validate	active
+otspot::conic_presolve_fallback_sentinel	nql60_inconclusive_reduced_solve_falls_back_to_optimal	ignored
+otspot::conic_presolve_routing_gate	cblib_routing_gate_decision_table_on_real_reductions	active
+otspot::conic_presolve_routing_gate	forced_attempt_on_declined_class_still_falls_back_to_optimal	ignored
+otspot::conic_presolve_routing_gate	forced_legacy_route_agrees_with_gated_route_on_attempt_class	active
+otspot::conic_presolve_routing_gate	nql60_class_never_enters_reduced_attempt_path	active
 otspot::conic_qps_integration	qps_convex_qp_via_conic_bridge_matches_native_qp	active
 otspot::conic_startpoint_sentinel	large_rhs_socp_converges_from_data_driven_start	active
 otspot::conic_w_ds_recovery_sentinel	cblib_w_root_relaxation_reaches_optimal	active
