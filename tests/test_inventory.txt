@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3547 testcases, 44 ignored
+# totals: 3548 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -1764,6 +1764,7 @@ otspot-core	simplex::dual_advanced::bounded_core::tests::staged_flip_commit_matc
 otspot-core	simplex::dual_advanced::bounded_core::tests::ub_violation_returns_specialised_outcome	active
 otspot-core	simplex::dual_advanced::core::tests::b4_perturb_x_false_does_not_modify_xb	active
 otspot-core	simplex::dual_advanced::core::tests::basis_cycle_detector_flags_repeated_basis_and_clear_resets	active
+otspot-core	simplex::dual_advanced::core::tests::basis_cycle_detector_hash_key_matches_reference_impl	active
 otspot-core	simplex::dual_advanced::core::tests::core_rc_timed_deadline_checks_are_chunked_not_per_column	active
 otspot-core	simplex::dual_advanced::core::tests::deadline_before_eta_leaves_advanced_dual_state_atomic	active
 otspot-core	simplex::dual_advanced::core::tests::dse_gamma_update_reduces_iterations	active
