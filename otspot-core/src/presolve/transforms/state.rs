@@ -261,3 +261,123 @@ fn update_sparse_entry(entries: &mut Vec<(usize, f64)>, index: usize, delta: f64
         entries.push((index, delta));
     }
 }
+
+// Scratch staging writes performed by the reduced-matrix rebuild so far on
+// this thread (test builds only).
+//
+// `driver::build_reduced_result` is contractually a *direct* builder: it
+// writes each emitted output entry exactly once, from the column side of
+// the dual representation into the final CSC arrays. A COO/triplet staging
+// detour would write every entry at least twice (driver staging plus
+// `from_triplets`' internal staging), materializing an extra full copy of
+// the matrix inside the window where the original problem and the dual
+// representation are still resident. The sentinel test in this module
+// asserts exactly one write per emitted entry, so a reintroduced staging
+// array — or a builder that skipped staging and wrote nothing — fails.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static REBUILD_SCRATCH_WRITES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Record `entries` scratch writes for the current rebuild (test builds
+/// only; see [`REBUILD_SCRATCH_WRITES`]; release builds compile the call
+/// site away).
+#[cfg(test)]
+pub(crate) fn count_rebuild_scratch_entry(entries: usize) {
+    REBUILD_SCRATCH_WRITES.with(|c| c.set(c.get() + entries));
+}
+
+/// A rebuild is only meaningful (and only sentinel-testable) when it emits
+/// matrix entries at all: the sentinel's write budget is `writes per entry`,
+/// which needs at least one emitted entry to distinguish a direct builder
+/// from a staging detour or a non-writing stub.
+#[cfg(test)]
+const SENTINEL_MIN_REBUILT_NNZ: usize = 1;
+
+/// The write budget the sentinel enforces: exactly one scratch write per
+/// emitted entry (direct build). `> 1` means a staging array reappeared.
+#[cfg(test)]
+const SENTINEL_SCRATCH_WRITES_PER_ENTRY: usize = 1;
+
+#[cfg(test)]
+mod rebuild_residency_sentinel {
+    use super::{
+        PresolveState, REBUILD_SCRATCH_WRITES, SENTINEL_MIN_REBUILT_NNZ,
+        SENTINEL_SCRATCH_WRITES_PER_ENTRY,
+    };
+    use crate::problem::LpProblem;
+    use otspot_num::sparse::CscMatrix;
+
+    /// Sentinel (no-op-fail): `build_reduced_result` must be a direct
+    /// builder — exactly [`SENTINEL_SCRATCH_WRITES_PER_ENTRY`] scratch write
+    /// per emitted entry. A revert to the COO-triplet rebuild (driver
+    /// staging + `from_triplets` staging, 2–3 writes per entry) or any
+    /// builder that stops counting (0 writes) fails this equality without
+    /// depending on allocator behavior or wall-clock timing.
+    #[test]
+    fn reduced_rebuild_writes_each_output_entry_exactly_once() {
+        // Direct on the builder rather than through `run_presolve`: the
+        // fixpoint's reductions are irrelevant to the write budget, and
+        // small fixtures get folded away entirely by presolve heuristics.
+        let a = CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+            .unwrap();
+        let problem = LpProblem::new(vec![1.0, 1.0], a, vec![1.0, 1.0]).unwrap();
+        let st = PresolveState::from_problem(&problem);
+
+        REBUILD_SCRATCH_WRITES.with(|c| c.set(0));
+        let out = super::super::driver::build_reduced_result_for_test(&problem, st, 2, 2, false)
+            .expect("feasible");
+        let writes = REBUILD_SCRATCH_WRITES.with(|c| c.get());
+        let emitted = out.reduced_problem.a.nnz();
+        assert!(
+            emitted >= SENTINEL_MIN_REBUILT_NNZ,
+            "fixture must emit a non-empty matrix for the write budget to be meaningful"
+        );
+        assert_eq!(
+            writes,
+            emitted * SENTINEL_SCRATCH_WRITES_PER_ENTRY,
+            "direct rebuild must write each emitted entry once; got {writes} writes \
+             for {emitted} entries (a triplet staging detour doubles/triples this)"
+        );
+    }
+
+    /// Independent-oracle pin for the direct builder's merge contract, which
+    /// `CscMatrix::from_triplets` used to provide: per-column row indices in
+    /// ascending order, duplicate `(row, col)` sums, `DROP_TOL` pruning of
+    /// merged cancellations, and `ZERO_TOL` filtering of structural zeros —
+    /// with the expected arrays hand-computed.
+    #[test]
+    fn direct_rebuild_merges_prunes_and_sorts_like_independent_oracle() {
+        let a = CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+            .unwrap();
+        let problem = LpProblem::new(vec![1.0, 1.0], a.clone(), vec![1.0, 1.0]).unwrap();
+        let mut st = PresolveState::from_problem(&problem);
+        // Hand-built column contents: column 0 carries an unsorted order,
+        // a duplicate pair (rows 0) that must merge to 5.0, and a duplicate
+        // pair (rows 1) that cancels to 0.0 and must be pruned at DROP_TOL;
+        // column 1 carries a sub-ZERO_TOL entry and an entry in a removed
+        // row, both of which must vanish.
+        st.col_entries[0] = vec![(1, 1.0), (1, -1.0), (0, 2.0), (0, 3.0)];
+        st.col_entries[1] = vec![(1, 9.0), (0, 1e-13)];
+        st.removed_rows[1] = true;
+
+        let out = super::super::driver::build_reduced_result_for_test(&problem, st, 2, 2, false)
+            .expect("feasible");
+        let reduced = &out.reduced_problem.a;
+        assert_eq!(reduced.nrows(), 1);
+        assert_eq!(reduced.ncols(), 2);
+        assert_eq!(reduced.col_ptr(), &[0, 1, 1], "column 1 fully pruned");
+        assert_eq!(
+            reduced.row_ind(),
+            &[0],
+            "merged column keeps one live entry"
+        );
+        assert_eq!(
+            reduced.values(),
+            &[5.0],
+            "duplicate rows sum in place: 2.0 + 3.0"
+        );
+        assert!(out.was_reduced);
+    }
+}

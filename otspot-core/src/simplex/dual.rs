@@ -11,7 +11,6 @@ use super::unbounded_ray::lp_ray_payload;
 use super::{stop_result_with_incumbent, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
-use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::tolerances::*;
 use otspot_num::sparse::{CscMatrix, SparseVec};
@@ -42,16 +41,31 @@ pub(crate) fn two_phase_dual_simplex(
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> SolverResult {
-    let m = sf.m;
-    let Some((a, b, c, row_scale, col_scale)) =
-        LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
-    else {
+    let Some((a, b, c, row_scale, col_scale)) = super::legacy_scale_triple(sf, options) else {
         return SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
             ..Default::default()
         };
     };
+    two_phase_dual_simplex_scaled(sf, problem, options, &a, &b, &c, &row_scale, &col_scale)
+}
+
+/// Same solve on a caller-materialized equilibration. `dual_advanced` hoists
+/// the single scale its Ge branch needs so the unscaled standard-form matrix
+/// can be released before this window; bit-for-bit identical because the
+/// wrapper's `legacy_scale_triple` is the same deterministic construction.
+pub(super) fn two_phase_dual_simplex_scaled(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    options: &SolverOptions,
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    row_scale: &[f64],
+    col_scale: &[f64],
+) -> SolverResult {
+    let m = sf.m;
 
     if let Some(warm) = &options.warm_start {
         if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {
@@ -59,10 +73,10 @@ pub(crate) fn two_phase_dual_simplex(
 
             // Singular basis falls through to cold start.
             if let Ok(mut basis_mgr) =
-                LuBasis::new_timed(&a, &basis, options.max_etas, options.deadline)
+                LuBasis::new_timed(a, &basis, options.max_etas, options.deadline)
             {
                 // x_B = B^{-1} b_new
-                let mut x_b_sv = SparseVec::from_dense(&b);
+                let mut x_b_sv = SparseVec::from_dense(b);
                 basis_mgr.ftran(&mut x_b_sv);
                 let mut x_b = x_b_sv.to_dense();
 
@@ -75,10 +89,10 @@ pub(crate) fn two_phase_dual_simplex(
                 if !super::has_lb_violation(&x_b, options.primal_tol) {
                     let mut total_iters: usize = 0;
                     let outcome = dual_simplex_core(
-                        &a,
+                        a,
                         &mut x_b,
-                        &c,
-                        &b,
+                        c,
+                        b,
                         &mut basis,
                         m,
                         sf.n_total,
@@ -87,7 +101,7 @@ pub(crate) fn two_phase_dual_simplex(
                     );
 
                     let mut result = outcome_to_result(
-                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale, true, options,
+                        outcome, sf, problem, &basis, &x_b, col_scale, row_scale, true, options,
                     );
                     result.iterations = total_iters;
                     return result;
@@ -96,7 +110,7 @@ pub(crate) fn two_phase_dual_simplex(
         }
     }
 
-    cold_start_dual(sf, problem, options, &a, &b, &c, &row_scale, &col_scale)
+    cold_start_dual(sf, problem, options, a, b, c, row_scale, col_scale)
 }
 
 /// Cost-perturbation cold start: Dual Phase I restores primal feasibility,
@@ -114,9 +128,12 @@ fn cold_start_dual(
 ) -> SolverResult {
     let m = sf.m;
 
-    // Ge/Eq → slack basis is singular; fall back to primal simplex.
+    // Ge/Eq → slack basis is singular; fall back to primal simplex. The
+    // triple this call already holds is threaded through: re-scaling inside
+    // `two_phase_simplex` used to mint a third matrix copy next to the
+    // caller's, all bit-equal under the deterministic equilibration.
     if sf.num_artificial > 0 {
-        return super::two_phase_simplex(sf, problem, options);
+        return super::two_phase_simplex(sf, problem, options, a, b, c, row_scale, col_scale);
     }
 
     // Le-only: B=I, x_B = b ≥ 0 after standard-form transform.

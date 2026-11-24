@@ -22,7 +22,7 @@ use crate::options::SolverOptions;
 use crate::tolerances::PIVOT_TOL;
 use otspot_num::linalg::timeout::deadline_reached;
 use otspot_num::sparse::{CscMatrix, SparseVec};
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 #[cfg(test)]
@@ -87,14 +87,36 @@ struct LexPerturbStats {
     effect: f64,
 }
 
+/// 基底反復 (cycle) 検出器。
+///
+/// キーは基底列の u64 フィンガープリント (固定長)。旧実装は基底
+/// `Vec<usize>` 全体を `HashMap<Vec<usize>, usize>` に保持しており、退化 LP では
+/// iters × (8m + 48) B で無制限に成長した (レコード辺 8B×m 列 + Vec ヘッダ/容量
+/// 余裕 ~48B。rail4284 級 m=4285 で 2 万反復 ≈ 690 MB)。固定長キーへ変えたことで
+/// 1 エントリあたりのコストは基底サイズ m に依存しなくなった。
+///
+/// ハッシュ衝突時の挙動は偽 cycle 検出による bland_mode の早期移行のみ。
+/// Bland's rule の有限終了保証 (下記 bland_mode 経路) により正しさは壊れず、
+/// 影響は性能にのみ現れる。同一方式 (DefaultHasher u64 + HashSet) は primal core の
+/// `cycle_basis_hashes` で本番運用実績がある。
 #[derive(Default)]
 struct BasisCycleDetector {
-    seen: HashMap<Vec<usize>, usize>,
+    seen: HashSet<u64>,
 }
 
 impl BasisCycleDetector {
-    fn repeated(&mut self, iter: usize, basis: &[usize]) -> bool {
-        self.seen.insert(basis.to_vec(), iter).is_some()
+    /// 基底が過去に出現済みなら true。
+    ///
+    /// ハッシュ前に `basis.len()` を混ぜるのは、usize 要素のスライス hash が
+    /// 要素バイト列のみを feed し長さ区切りを出力しないため、先頭要素が一致する
+    /// 別長さの基底 (例: `[1,2]` と `[1,2,0]`) が同一ハッシュ化されるのを防ぐため
+    /// (primal core と同一慣用句)。
+    fn repeated(&mut self, basis: &[usize]) -> bool {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        basis.len().hash(&mut hasher);
+        basis.hash(&mut hasher);
+        !self.seen.insert(hasher.finish())
     }
 
     fn clear(&mut self) {
@@ -420,7 +442,7 @@ pub(crate) fn dual_simplex_core_advanced(
             t.log(*iter_count_out, obj, basis, bland_mode);
         }
 
-        if !bland_mode && cycle_detector.repeated(*iter_count_out, basis) {
+        if !bland_mode && cycle_detector.repeated(basis) {
             bland_mode = true;
         }
 
@@ -1086,17 +1108,85 @@ mod tests {
     #[test]
     fn basis_cycle_detector_flags_repeated_basis_and_clear_resets() {
         let mut detector = BasisCycleDetector::default();
-        assert!(!detector.repeated(1, &[1, 2, 3]));
-        assert!(!detector.repeated(2, &[1, 3, 2]));
+        assert!(!detector.repeated(&[1, 2, 3]));
+        assert!(!detector.repeated(&[1, 3, 2]));
         assert!(
-            detector.repeated(3, &[1, 2, 3]),
+            detector.repeated(&[1, 2, 3]),
             "revisiting an earlier basis must trigger Bland/lex anti-cycling"
         );
         detector.clear();
         assert!(
-            !detector.repeated(4, &[1, 2, 3]),
+            !detector.repeated(&[1, 2, 3]),
             "real progress clears the cycle window"
         );
+    }
+
+    /// ハッシュキー化した BasisCycleDetector が、旧実装の参照実装
+    /// (基底 Vec 全体をキーとする HashMap<Vec<usize>, usize>) と同一の判定系列を
+    /// 返すことを決定的入力で検証する。 sentinel マーカーは付けていない:
+    /// u64 ハッシュは base commit の Vec キー実装でも同じ判定を返すため、
+    /// 偽 red (base で緑になる「修正前 fail」) になり UNVERIFIABLE gate に
+    /// 抵触する。ここでは等価性・決定論性・clear() 復元を assert する。
+    #[test]
+    fn basis_cycle_detector_hash_key_matches_reference_impl() {
+        // splitmix64 で決定的に 100 超の相異なる基底列バリエーションを作る
+        // (長さは 1..=17 で可変。ソート+重複除去で基底としての正当性を保つ)。
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        let mut next_rand = move || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        let mut bases: Vec<Vec<usize>> = Vec::new();
+        while bases.len() < 128 {
+            let len = 1 + (next_rand() % 17) as usize;
+            let mut cand: Vec<usize> = (0..len).map(|_| (next_rand() % 64) as usize).collect();
+            cand.sort_unstable();
+            cand.dedup();
+            if !bases.contains(&cand) {
+                bases.push(cand);
+            }
+        }
+        assert!(bases.len() >= 100);
+
+        // 初出と再出を混ぜた列 (b[i], b[i/2] の再出, b[i]) を構成する。
+        let seq: Vec<&Vec<usize>> = (0..bases.len())
+            .flat_map(|i| [i, i / 2, i])
+            .map(|i| &bases[i])
+            .collect();
+
+        let mut detector = BasisCycleDetector::default();
+        // 参照実装: 旧 HashMap<Vec<usize>, usize> そのままのキー・戻り値 semantics。
+        let mut reference: std::collections::HashMap<Vec<usize>, usize> =
+            std::collections::HashMap::new();
+        let mut observed = Vec::with_capacity(seq.len());
+        let mut expected = Vec::with_capacity(seq.len());
+        for (iter, basis) in seq.iter().enumerate() {
+            observed.push(detector.repeated(basis));
+            expected.push(reference.insert((*basis).clone(), iter).is_some());
+        }
+        assert_eq!(
+            observed, expected,
+            "u64 hash key must reproduce the exact full-Vec-key reference verdicts"
+        );
+        assert!(observed.iter().any(|&v| v));
+        assert!(!observed.iter().all(|&v| v));
+
+        // 決定論性: DefaultHasher の同一入力は再実行でも同じ判定系列を返す。
+        let mut rerun = BasisCycleDetector::default();
+        for (basis, &want) in seq.iter().zip(observed.iter()) {
+            assert_eq!(rerun.repeated(basis), want);
+        }
+
+        // clear() 後は再出が false (初出扱い) に戻る。
+        detector.clear();
+        reference.clear();
+        for basis in bases.iter().take(8) {
+            assert!(!detector.repeated(basis));
+            assert!(reference.insert(basis.clone(), 0).is_none());
+        }
     }
 
     /// Sentinel (P0 proof): lb-violation + sign-flipped ratio test None
@@ -1658,7 +1748,8 @@ mod tests {
 
             // Cold solve to get an optimal basis.
             let sf = build_standard_form(&lp);
-            let cold = super::super::solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            let cold =
+                super::super::solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
             if cold.status != SolveStatus::Optimal {
                 eprintln!(
                     "[dse_gamma_update seed={seed}] cold non-Optimal: {:?}",
@@ -1694,7 +1785,7 @@ mod tests {
 
             // DSE γ ON (normal Forrest-Goldfarb update).
             let r_on = super::super::solve_dual_advanced(
-                &sf_p,
+                sf_p.clone(),
                 &lp_p,
                 &make_warm_opts(DualPricing::SteepestEdge, warm_basis.basis.clone()),
             );
@@ -1704,7 +1795,7 @@ mod tests {
             // visible only within this process and on this single thread.
             unsafe { std::env::set_var("DSE_DISABLE_GAMMA_UPDATE", "1") };
             let r_off = super::super::solve_dual_advanced(
-                &sf_p,
+                sf_p.clone(),
                 &lp_p,
                 &make_warm_opts(DualPricing::SteepestEdge, warm_basis.basis),
             );

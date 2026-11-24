@@ -59,6 +59,32 @@ pub fn lp_scale_profile_delta(
 /// Static `scale()` only; not intended for instantiation.
 pub struct LpEquilibration;
 
+// Equilibration invocations performed on this thread (test builds only).
+// The legacy simplex chain (`solve_dual_advanced`'s hoisted scale ->
+// `two_phase_dual_simplex_scaled` -> `cold_start_dual` ->
+// `two_phase_simplex`) must materialize the standard-form equilibration at
+// most once per solve: every deeper pass consumes the caller's threaded
+// triple. Pre-restructure the Ge/Eq chain materialized it three times
+// (pre-warm eager copy, `two_phase_dual_simplex`'s private copy,
+// `two_phase_simplex`'s private copy), each a full matrix co-resident with
+// the others inside the iteration window. Sentinel:
+// `legacy_ge_chain_materializes_exactly_one_equilibration`.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RUIZ_SCALE_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_ruiz_scale_calls() {
+    RUIZ_SCALE_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn ruiz_scale_calls() -> usize {
+    RUIZ_SCALE_CALLS.with(|c| c.get())
+}
+
 impl LpEquilibration {
     /// Apply Ruiz equilibration to a matrix, RHS vector, and cost vector.
     ///
@@ -83,6 +109,8 @@ impl LpEquilibration {
         c: &[f64],
         deadline: Option<std::time::Instant>,
     ) -> Option<LpScalingResult> {
+        #[cfg(test)]
+        RUIZ_SCALE_CALLS.with(|c| c.set(c.get() + 1));
         let profile = lp_scale_profile_enabled();
         let t_profile = profile.then(std::time::Instant::now);
         let result = Self::scale_with_deadline_inner(matrix, b, c, deadline);
@@ -290,5 +318,68 @@ mod tests {
                 scaled_a.values()[k]
             );
         }
+    }
+
+    /// Sentinel for co-resident working-set copies: the legacy Ge/Eq chain
+    /// must materialize the standard-form equilibration exactly once per
+    /// solve. Pre-restructure, `solve_dual_advanced` scaled eagerly before
+    /// the warm branch, `two_phase_dual_simplex` scaled privately, and
+    /// `two_phase_simplex` scaled privately again — three full matrix copies
+    /// alive inside the same iteration window. Reverting any of the three
+    /// hoist/thread steps raises this count and fails here deterministically
+    /// (a call counter, not a memory probe).
+    #[test]
+    fn legacy_ge_chain_materializes_exactly_one_equilibration() {
+        use crate::options::SolverOptions;
+        use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+        use crate::simplex::{build_standard_form, dual_advanced::solve_dual_advanced};
+        use otspot_num::sparse::CscMatrix;
+
+        const EXPECTED_SCALE_CALLS: usize = 1;
+        const OBJ_TOL: f64 = 1e-9;
+
+        // min x + y  s.t.  x + y >= 3,  0 <= x, y (no finite upper bounds:
+        // the bounded dispatch is skipped and the legacy Ge chain runs).
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        assert!(
+            SolverOptions::default().use_ruiz_scaling,
+            "precondition: default options must enable Ruiz scaling, else \
+             this counter measures the identity-clone branch instead"
+        );
+
+        let sf = build_standard_form(&lp);
+        reset_ruiz_scale_calls();
+        let r = solve_dual_advanced(sf, &lp, &SolverOptions::default());
+        let calls = ruiz_scale_calls();
+
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "precondition: legacy Ge chain must have run to Optimal"
+        );
+        assert!(
+            (r.objective - 3.0).abs() < OBJ_TOL,
+            "precondition: legacy Ge chain objective, got {}",
+            r.objective
+        );
+        assert_eq!(
+            calls, EXPECTED_SCALE_CALLS,
+            "the legacy Ge chain materialized {calls} standard-form \
+             equilibrations; exactly one is allowed (hoisted once in \
+             `solve_dual_advanced`, threaded through \
+             `two_phase_dual_simplex_scaled` -> `cold_start_dual` -> \
+             `two_phase_simplex`). Each extra copy is a full matrix \
+             co-resident with the unscaled standard form inside the \
+             iteration window"
+        );
     }
 }

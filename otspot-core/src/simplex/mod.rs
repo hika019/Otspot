@@ -28,6 +28,31 @@ pub(crate) use primal::{
 };
 
 pub(crate) use standard_form::build_standard_form;
+
+/// The scaling triple the legacy (non-bounded) simplex paths consume: the
+/// deterministic equilibration under `use_ruiz_scaling`, the matrix itself
+/// with identity scales otherwise (a clone, since consumers take `&`-typed
+/// inputs). Hoisting each branch's construction to the caller is what keeps
+/// one copy from being pinned across a window where the caller already holds
+/// the unscaled standard form and a deeper pass would build its own working
+/// copy. Deadline loss surfaces as `None`; callers mint the same `Timeout`
+/// shape the path they feed minted.
+pub(crate) fn legacy_scale_triple(
+    sf: &StandardForm,
+    options: &crate::options::SolverOptions,
+) -> Option<crate::presolve::LpScalingResult> {
+    if options.use_ruiz_scaling {
+        crate::presolve::LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
+    } else {
+        Some((
+            sf.a.clone(),
+            sf.b.clone(),
+            sf.c.clone(),
+            vec![1.0; sf.m],
+            vec![1.0; sf.n_total],
+        ))
+    }
+}
 #[cfg(test)]
 pub(crate) use standard_form::OrigVarInfo;
 pub(crate) use standard_form::{

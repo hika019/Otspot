@@ -51,6 +51,7 @@ fn bump_build_standard_form_call_count() {}
 
 /// Mapping from one original variable to its standard-form representation.
 /// Typically 1 new var (shifted bound) or 2 (free-variable split into ±).
+#[derive(Clone)]
 pub(crate) struct OrigVarInfo {
     pub(crate) offset: f64,
     pub(crate) new_vars: Vec<(usize, f64)>,
@@ -58,6 +59,12 @@ pub(crate) struct OrigVarInfo {
 
 /// Standard-form LP: A, b, c after slack addition, variable shifts/splits,
 /// and per-row sign normalization.
+///
+/// `Clone` exists for callers that must keep the form alive after handing an
+/// owned copy to the consuming legacy chain
+/// (`dual_advanced::solve_dual_advanced`); production takes no clone on that
+/// chain — it transfers by value and releases the matrix.
+#[derive(Clone)]
 pub(crate) struct StandardForm {
     pub(crate) a: CscMatrix,
     pub(crate) b: Vec<f64>,
