@@ -1748,7 +1748,8 @@ mod tests {
 
             // Cold solve to get an optimal basis.
             let sf = build_standard_form(&lp);
-            let cold = super::super::solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            let cold =
+                super::super::solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
             if cold.status != SolveStatus::Optimal {
                 eprintln!(
                     "[dse_gamma_update seed={seed}] cold non-Optimal: {:?}",
@@ -1784,7 +1785,7 @@ mod tests {
 
             // DSE γ ON (normal Forrest-Goldfarb update).
             let r_on = super::super::solve_dual_advanced(
-                &sf_p,
+                sf_p.clone(),
                 &lp_p,
                 &make_warm_opts(DualPricing::SteepestEdge, warm_basis.basis.clone()),
             );
@@ -1794,7 +1795,7 @@ mod tests {
             // visible only within this process and on this single thread.
             unsafe { std::env::set_var("DSE_DISABLE_GAMMA_UPDATE", "1") };
             let r_off = super::super::solve_dual_advanced(
-                &sf_p,
+                sf_p.clone(),
                 &lp_p,
                 &make_warm_opts(DualPricing::SteepestEdge, warm_basis.basis),
             );

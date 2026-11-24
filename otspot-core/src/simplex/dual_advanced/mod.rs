@@ -10,7 +10,7 @@ use super::{build_bounded_standard_form_with_deadline, BoundedStandardForm};
 use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{DualPricing, SolverOptions};
-use crate::presolve::LpEquilibration;
+use crate::presolve::LpScalingResult;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use bounded_core::extract::bounded_obj;
 use bounded_core::BoundedDualState;
@@ -379,7 +379,7 @@ fn warm_basis_is_dual_feasible(
 /// cold-start (Le-only): コスト摂動でDual実行可能性を確保し、Harris ratio testで最適化
 /// cold-start (Ge/Eq含む): dual::two_phase_dual_simplexにフォールバック
 pub(crate) fn solve_dual_advanced(
-    sf: &StandardForm,
+    mut sf: StandardForm,
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> SolverResult {
@@ -416,26 +416,21 @@ pub(crate) fn solve_dual_advanced(
     }
 
     let m = sf.m;
-    let (a, b, c, row_scale, col_scale) = if options.use_ruiz_scaling {
-        let Some(scaled) =
-            LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
-        else {
-            return SolverResult::timeout();
-        };
-        scaled
-    } else {
-        (
-            sf.a.clone(),
-            sf.b.clone(),
-            sf.c.clone(),
-            vec![1.0; sf.m],
-            vec![1.0; sf.n_total],
-        )
-    };
+    // Legacy-path scale triple, materialized only in the branches that
+    // consume it (`legacy_scale_triple`). The previous eager pre-warm
+    // position pinned a full scaled copy across the entire legacy window
+    // even on the Ge/Eq two-phase branch — which consumes its own
+    // equilibration further down and never reads the pre-warm copy — so
+    // there the copy was pure idle residency next to the standard-form
+    // matrix and the deeper pass's working copy.
 
     if let Some(warm) = &options.warm_start {
         // Warm start: 提供された基底でx_Bを新しいRHSから再計算
         if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {
+            let Some((a, b, c, row_scale, col_scale)) = super::legacy_scale_triple(&sf, options)
+            else {
+                return SolverResult::timeout();
+            };
             let mut basis = warm.basis.clone();
 
             match LuBasis::new_timed(&a, &basis, options.max_etas, options.deadline) {
@@ -488,7 +483,7 @@ pub(crate) fn solve_dual_advanced(
                         );
 
                         let mut result = outcome_to_result(
-                            outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale, true,
+                            outcome, &sf, problem, &basis, &x_b, &col_scale, &row_scale, true,
                             options,
                         );
                         result.iterations = total_iters;
@@ -510,7 +505,10 @@ pub(crate) fn solve_dual_advanced(
 
     // cold-start: Le-only問題（人工変数不要）はHarris dual simplexを使用
     if sf.num_artificial == 0 {
-        return cold_start_advanced(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
+        let Some((a, b, c, row_scale, col_scale)) = super::legacy_scale_triple(&sf, options) else {
+            return SolverResult::timeout();
+        };
+        return cold_start_advanced(&sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
     }
 
     // Cold-start with Ge/Eq constraints: try the standard two-phase simplex
@@ -521,16 +519,44 @@ pub(crate) fn solve_dual_advanced(
     // Big-M remains the fallback for cases where primal Phase I never produced
     // a feasible incumbent, or where primal reported Infeasible without a
     // verifiable Farkas ray.
-    let primal_result = super::dual::two_phase_dual_simplex(sf, problem, options);
+    //
+    // The single equilibration that this branch's deeper passes always
+    // built themselves internally, hoisted to the caller so the unscaled
+    // standard-form matrix can be released before the LU + iteration window
+    // below. The None-timeout mirrors the shape the deeper pass minted when
+    // its own scaling lost the deadline.
+    let Some((a, b, c, row_scale, col_scale)) = super::legacy_scale_triple(&sf, options) else {
+        return SolverResult {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            ..Default::default()
+        };
+    };
+    if options.use_ruiz_scaling {
+        // Nothing further on this branch reads `sf.a`: the two-phase path
+        // consumes the scaled copy above, and so does the Big-M retry (under
+        // Ruiz its pre-restructure input was the same deterministic
+        // equilibration of the same matrix, see `big_m_retry_inputs`).
+        // Releasing it removes one full standard-form matrix from the
+        // residency window of every refactorization and iteration after.
+        sf.a = CscMatrix::new(sf.m, sf.n_total);
+    }
+    let primal_result = super::dual::two_phase_dual_simplex_scaled(
+        &sf, problem, options, &a, &b, &c, &row_scale, &col_scale,
+    );
     match primal_result.status {
         // No incumbent from the primal path: try Big-M. MaxIterations is the
         // internal-stall analogue of the old empty-Timeout (stalls minted
         // Timeout before the Stalled split) — the retry policy must not narrow.
         SolveStatus::Timeout | SolveStatus::MaxIterations if primal_result.solution.is_empty() => {
             let iters = primal_result.iterations;
-            let Some(bigm_result) = big_m_retry(
-                sf, problem, options, &a, &b, &c, &row_scale, &col_scale, iters,
-            ) else {
+            let bigm_extra = big_m_retry_inputs(&sf, options);
+            let (ba, bb, bc, brs, bcs) = match &bigm_extra {
+                Some((a_, b_, c_, r_, s_)) => (a_, &b_[..], &c_[..], &r_[..], &s_[..]),
+                None => (&a, &b[..], &c[..], &row_scale[..], &col_scale[..]),
+            };
+            let Some(bigm_result) = big_m_retry(&sf, problem, options, ba, bb, bc, brs, bcs, iters)
+            else {
                 return primal_result;
             };
             if bigm_result.status == SolveStatus::Timeout {
@@ -544,9 +570,13 @@ pub(crate) fn solve_dual_advanced(
         SolveStatus::Infeasible if !primal_result.dual_solution.is_empty() => primal_result,
         SolveStatus::Infeasible => {
             let iters = primal_result.iterations;
-            let Some(bigm_result) = big_m_retry(
-                sf, problem, options, &a, &b, &c, &row_scale, &col_scale, iters,
-            ) else {
+            let bigm_extra = big_m_retry_inputs(&sf, options);
+            let (ba, bb, bc, brs, bcs) = match &bigm_extra {
+                Some((a_, b_, c_, r_, s_)) => (a_, &b_[..], &c_[..], &r_[..], &s_[..]),
+                None => (&a, &b[..], &c[..], &row_scale[..], &col_scale[..]),
+            };
+            let Some(bigm_result) = big_m_retry(&sf, problem, options, ba, bb, bc, brs, bcs, iters)
+            else {
                 return infeasible_without_ray_after_exhausted_retry(primal_result, options);
             };
             if bigm_result.status == SolveStatus::Timeout {
@@ -578,6 +608,22 @@ fn infeasible_without_ray_after_exhausted_retry(
     SolverResult {
         status: super::stop_status(!primal_result.solution.is_empty(), options),
         ..primal_result
+    }
+}
+
+/// The scale triple the Big-M retry receives. Pre-restructure this was the
+/// eager pre-warm scaling of the whole legacy path. With `use_ruiz_scaling`
+/// it equals the single equilibration the caller hoists before the
+/// two-phase attempt (`scale_with_deadline` is deterministic on identical
+/// inputs), so `None` tells the caller to reuse it and nothing new is
+/// materialized. Without Ruiz the retry consumed
+/// `(sf.a.clone(), identity scales)`, and that copy is built here — only
+/// once a retry actually runs — instead of pinning the two-phase window.
+fn big_m_retry_inputs(sf: &StandardForm, options: &SolverOptions) -> Option<LpScalingResult> {
+    if options.use_ruiz_scaling {
+        None
+    } else {
+        super::legacy_scale_triple(sf, options)
     }
 }
 
@@ -921,7 +967,7 @@ mod tests {
         let lp = lp_flip_trigger();
         let sf = build_standard_form(&lp);
         reset_bfrt_flip_invocations();
-        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let result = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         let flips = bfrt_flip_invocations();
         assert_eq!(
             result.status,
@@ -951,7 +997,7 @@ mod tests {
             ..SolverOptions::default()
         };
         reset_bfrt_flip_invocations();
-        let result = solve_dual_advanced(&sf, &lp, &options);
+        let result = solve_dual_advanced(sf.clone(), &lp, &options);
         let flips_disabled = bfrt_flip_invocations();
         assert_eq!(
             flips_disabled, 0,
@@ -969,7 +1015,7 @@ mod tests {
         {
             let lp = lp_2x2_boxed();
             let sf = build_standard_form(&lp);
-            let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
             assert_eq!(r.status, SolveStatus::Optimal, "pattern 1 status");
             assert!(
                 (r.objective - (-6.0)).abs() < 1e-5,
@@ -983,7 +1029,7 @@ mod tests {
             let lp = lp_flip_trigger();
             let sf = build_standard_form(&lp);
             reset_bfrt_flip_invocations();
-            let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
             let flips = bfrt_flip_invocations();
             assert_eq!(r.status, SolveStatus::Optimal, "pattern 2 status");
             assert!(
@@ -1000,7 +1046,7 @@ mod tests {
         {
             let lp = lp_no_ub();
             let sf = build_standard_form(&lp);
-            let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
             assert_eq!(r.status, SolveStatus::Optimal, "pattern 3 status");
         }
     }
@@ -1031,7 +1077,7 @@ mod tests {
         )
         .unwrap();
         let sf = build_standard_form(&lp);
-        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         assert_eq!(
             r.status,
             SolveStatus::Optimal,
@@ -1074,7 +1120,7 @@ mod tests {
         )
         .unwrap();
         let sf = build_standard_form(&lp);
-        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         assert_eq!(
             r.status,
             SolveStatus::Infeasible,
@@ -1108,7 +1154,7 @@ mod tests {
         )
         .unwrap();
         let sf = build_standard_form(&lp);
-        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         assert_eq!(
             r.status,
             SolveStatus::Optimal,
@@ -1169,7 +1215,7 @@ mod tests {
         )
         .unwrap();
         let sf = build_standard_form(&lp);
-        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         assert_eq!(
             r.status,
             SolveStatus::Optimal,
@@ -1209,7 +1255,7 @@ mod tests {
         )
         .unwrap();
         let sf = build_standard_form(&lp);
-        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         assert_eq!(
             r.status,
             SolveStatus::Optimal,
@@ -1277,7 +1323,7 @@ mod tests {
         // Cold solve: b=[4,3,2], optimal x0=3, x1=1, obj=-10.
         let lp_orig = make_lp(vec![4.0, 3.0, 2.0]);
         let sf_orig = build_standard_form(&lp_orig);
-        let r_cold = solve_dual_advanced(&sf_orig, &lp_orig, &SolverOptions::default());
+        let r_cold = solve_dual_advanced(sf_orig.clone(), &lp_orig, &SolverOptions::default());
         assert_eq!(
             r_cold.status,
             SolveStatus::Optimal,
@@ -1298,7 +1344,7 @@ mod tests {
         let lp_p = make_lp(vec![1.0, 3.0, 2.0]);
         let sf_p = build_standard_form(&lp_p);
         let r_warm = solve_dual_advanced(
-            &sf_p,
+            sf_p.clone(),
             &lp_p,
             &SolverOptions {
                 warm_start: Some(warm),
@@ -1318,7 +1364,7 @@ mod tests {
         );
 
         // Consistency: cold re-solve agrees.
-        let r_cold_p = solve_dual_advanced(&sf_p, &lp_p, &SolverOptions::default());
+        let r_cold_p = solve_dual_advanced(sf_p.clone(), &lp_p, &SolverOptions::default());
         assert_eq!(r_cold_p.status, SolveStatus::Optimal);
         assert!(
             (r_cold_p.objective - r_warm.objective).abs() < OBJ_TOL,
@@ -1336,7 +1382,7 @@ mod tests {
         let lp = lp_flip_trigger();
         let sf = build_standard_form(&lp);
         reset_bfrt_flip_invocations();
-        let r1 = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let r1 = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         let flips = bfrt_flip_invocations();
         assert_eq!(r1.status, SolveStatus::Optimal);
         assert!(
@@ -1347,7 +1393,7 @@ mod tests {
             .warm_start_basis
             .expect("bounded path must return warm_start_basis");
         let r2 = solve_dual_advanced(
-            &sf,
+            sf.clone(),
             &lp,
             &SolverOptions {
                 warm_start: Some(ws),
@@ -1404,7 +1450,7 @@ mod tests {
         // Cold solve LP1: optimal basis is {slack=col 2}, x_B=[3], obj=0.
         let lp1 = make_lp(vec![1.0, 1.0]);
         let sf1 = build_standard_form(&lp1);
-        let r1 = solve_dual_advanced(&sf1, &lp1, &SolverOptions::default());
+        let r1 = solve_dual_advanced(sf1.clone(), &lp1, &SolverOptions::default());
         assert_eq!(
             r1.status,
             SolveStatus::Optimal,
@@ -1427,7 +1473,7 @@ mod tests {
         let sf2 = build_standard_form(&lp2);
         reset_legacy_warm_start_counts();
         let r2 = solve_dual_advanced(
-            &sf2,
+            sf2.clone(),
             &lp2,
             &SolverOptions {
                 warm_start: Some(ws),
@@ -1458,7 +1504,7 @@ mod tests {
         assert_eq!(legacy_warm_start_shape_mismatch_fallback_count(), 0);
 
         // Consistency: cold re-solve of LP2 must agree.
-        let r2_cold = solve_dual_advanced(&sf2, &lp2, &SolverOptions::default());
+        let r2_cold = solve_dual_advanced(sf2.clone(), &lp2, &SolverOptions::default());
         assert_eq!(r2_cold.status, SolveStatus::Optimal);
         assert!(
             (r2_cold.objective - r2.objective).abs() < OBJ_TOL,
@@ -1503,7 +1549,7 @@ mod tests {
 
         reset_legacy_warm_start_counts();
         let result = solve_dual_advanced(
-            &sf,
+            sf.clone(),
             &lp,
             &SolverOptions {
                 warm_start: Some(WarmStartBasis {
@@ -1556,7 +1602,7 @@ mod tests {
         .unwrap();
         let sf = build_standard_form(&lp);
 
-        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let result = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
 
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!(
@@ -1594,7 +1640,7 @@ mod tests {
         // Cold solve LP1 via bounded dispatch (Le-only, finite UBs).
         let lp1 = make_lp(5.0);
         let sf1 = build_standard_form(&lp1);
-        let r1 = solve_dual_advanced(&sf1, &lp1, &SolverOptions::default());
+        let r1 = solve_dual_advanced(sf1.clone(), &lp1, &SolverOptions::default());
         assert_eq!(r1.status, SolveStatus::Optimal, "LP1 cold: {:?}", r1.status);
         assert!(
             (r1.objective - (-9.0)).abs() < OBJ_TOL,
@@ -1609,7 +1655,7 @@ mod tests {
         let lp2 = make_lp(-1.0);
         let sf2 = build_standard_form(&lp2);
         let r2 = solve_dual_advanced(
-            &sf2,
+            sf2.clone(),
             &lp2,
             &SolverOptions {
                 warm_start: Some(warm),
@@ -1624,7 +1670,7 @@ mod tests {
         );
 
         // Cold solve of LP2 must also return Infeasible.
-        let r2_cold = solve_dual_advanced(&sf2, &lp2, &SolverOptions::default());
+        let r2_cold = solve_dual_advanced(sf2.clone(), &lp2, &SolverOptions::default());
         assert_eq!(
             r2_cold.status,
             SolveStatus::Infeasible,
@@ -1646,7 +1692,7 @@ mod tests {
             ..SolverOptions::default()
         };
 
-        let result = solve_dual_advanced(&sf, &lp, &options);
+        let result = solve_dual_advanced(sf.clone(), &lp, &options);
         assert_eq!(result.status, SolveStatus::Timeout);
     }
 
@@ -1680,7 +1726,7 @@ mod tests {
         let lp = lp_eq_with_finite_ubs();
         let sf = build_standard_form(&lp);
         bounded_core::reset_eq_ub_dispatch_count();
-        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let result = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         assert_eq!(result.status, SolveStatus::Optimal, "expected Optimal");
         assert!(
             (result.objective - 3.0).abs() < 1e-6,
@@ -1705,7 +1751,7 @@ mod tests {
             ..SolverOptions::default()
         };
         bounded_core::reset_eq_ub_dispatch_count();
-        let result = solve_dual_advanced(&sf, &lp, &options);
+        let result = solve_dual_advanced(sf.clone(), &lp, &options);
         let count = bounded_core::eq_ub_dispatch_count();
         assert_eq!(
             count, 0,
@@ -1723,7 +1769,7 @@ mod tests {
     fn eq_ub_phase1_solution_recovers_at_upper_variable() {
         let lp = lp_eq_with_finite_ubs();
         let sf = build_standard_form(&lp);
-        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let result = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         assert_eq!(result.status, SolveStatus::Optimal);
         assert_eq!(result.solution.len(), 2);
         // x0 at UB = 2, x1 = 1.
@@ -1758,7 +1804,7 @@ mod tests {
         )
         .unwrap();
         let sf = build_standard_form(&lp);
-        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let result = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         assert_eq!(
             result.status,
             SolveStatus::Infeasible,
@@ -1789,7 +1835,7 @@ mod tests {
             )
             .unwrap();
             let sf = build_standard_form(&lp);
-            let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
             assert_eq!(r.status, SolveStatus::Optimal, "pattern A");
             assert!(
                 (r.objective - 5.0).abs() < 1e-6,
@@ -1814,7 +1860,7 @@ mod tests {
             )
             .unwrap();
             let sf = build_standard_form(&lp);
-            let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
             assert_eq!(r.status, SolveStatus::Optimal, "pattern B");
             assert!(
                 (r.objective - (-4.0)).abs() < 1e-6,
@@ -1890,7 +1936,7 @@ mod tests {
             use_lp_crash_basis: false,
             ..SolverOptions::default()
         };
-        let r_off = solve_dual_advanced(&sf, &lp, &opts_off);
+        let r_off = solve_dual_advanced(sf.clone(), &lp, &opts_off);
         assert_eq!(
             r_off.status,
             SolveStatus::Optimal,
@@ -1918,7 +1964,7 @@ mod tests {
                 use_lp_crash_basis: false,
                 ..SolverOptions::default()
             };
-            let r_on = solve_dual_advanced(&sf, &lp, &opts_on);
+            let r_on = solve_dual_advanced(sf.clone(), &lp, &opts_on);
             assert_eq!(
                 r_on.status,
                 SolveStatus::Optimal,
@@ -2030,7 +2076,7 @@ mod tests {
         .unwrap();
         let sf = build_standard_form(&lp);
         bounded_core::reset_eq_ub_dispatch_count();
-        let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let r = solve_dual_advanced(sf.clone(), &lp, &SolverOptions::default());
         assert!(
             bounded_core::eq_ub_dispatch_count() > 0,
             "new Eq+UB path not dispatched"
@@ -2088,7 +2134,7 @@ mod tests {
             ..SolverOptions::default()
         };
         reset_bfrt_flip_invocations();
-        let r = solve_dual_advanced(&sf, &lp, &opts);
+        let r = solve_dual_advanced(sf.clone(), &lp, &opts);
         let flips = bfrt_flip_invocations();
         assert_eq!(r.status, SolveStatus::Optimal);
         assert!(
@@ -2133,7 +2179,7 @@ mod tests {
         };
         // Verify the new path is taken.
         bounded_core::reset_eq_ub_dispatch_count();
-        let result = solve_dual_advanced(&sf, &lp, &opts);
+        let result = solve_dual_advanced(sf.clone(), &lp, &opts);
         let dispatch_count = bounded_core::eq_ub_dispatch_count();
         assert!(
             dispatch_count > 0,

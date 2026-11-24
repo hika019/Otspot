@@ -12,8 +12,23 @@ use super::state::{PresolveFlags, PresolveResult, PresolveState, PresolveStatus}
 use crate::problem::{ConstraintType, LpProblem};
 use crate::tolerances::ZERO_TOL;
 use otspot_num::sparse::CscMatrix;
+use otspot_num::DROP_TOL;
 use otspot_num::{run_fixpoint, run_step, PipelineStop, SolveControl};
 use std::sync::atomic::AtomicBool;
+
+/// Test-only door into the reduced-matrix rebuild so the residency sentinel
+/// in `state.rs` survives a revert of `build_reduced_result` itself (the
+/// counter and the assertion live outside this file).
+#[cfg(test)]
+pub(crate) fn build_reduced_result_for_test(
+    problem: &LpProblem,
+    st: PresolveState,
+    n: usize,
+    m: usize,
+    pass_limit_hit: bool,
+) -> Result<PresolveResult, PresolveStatus> {
+    build_reduced_result(problem, st, n, m, pass_limit_hit)
+}
 
 // Test-only observability: counts how many transforms actually ran in the
 // current pass. Purely additive bookkeeping (never gates control flow on its
@@ -188,7 +203,7 @@ pub fn run_presolve_with_flags(
 
 fn build_reduced_result(
     problem: &LpProblem,
-    st: PresolveState,
+    mut st: PresolveState,
     n: usize,
     m: usize,
     pass_limit_hit: bool,
@@ -233,35 +248,103 @@ fn build_reduced_result(
         }
     }
 
-    let mut trip_rows: Vec<usize> = Vec::new();
-    let mut trip_cols: Vec<usize> = Vec::new();
-    let mut trip_vals: Vec<f64> = Vec::new();
+    // The row side of the dual representation is dead from here on: the
+    // emitted matrix is read exclusively from `col_entries` (column-major,
+    // exactly like the CSC being built). Releasing it before any output
+    // allocation is what keeps the rebuild from being resident at once with
+    // both the retained original matrix and the reduced one.
+    std::mem::take(&mut st.row_entries);
+
+    // Pass 1: upper-bound count of emitted entries per column (duplicates
+    // that pass 2 merges can only lower the true count). Non-finite values
+    // fail the same way `CscMatrix::from_triplets` used to, which triggers
+    // the whole-transaction rollback below. The predicate here is exactly
+    // the predicate pass 2 filters with, and no column is mutated between
+    // the passes, so pass 2 cannot discover a non-finite entry that pass 1
+    // did not already vet.
+    let mut col_bound_ptr: Vec<usize> = Vec::with_capacity(n_new + 1);
+    col_bound_ptr.push(0usize);
     for j in 0..n {
         if st.removed_cols[j] {
             continue;
         }
-        let jj = col_map[j].unwrap();
+        let mut count = 0usize;
         for &(row, val) in &st.col_entries[j] {
             if st.removed_rows[row] || val.abs() < ZERO_TOL {
                 continue;
             }
-            let ii = row_map[row].unwrap();
-            trip_rows.push(ii);
-            trip_cols.push(jj);
-            trip_vals.push(val);
+            if !val.is_finite() {
+                return Ok(PresolveResult::no_reduction(problem));
+            }
+            count += 1;
         }
+        col_bound_ptr.push(col_bound_ptr[col_bound_ptr.len() - 1] + count);
     }
+    let total_bound = *col_bound_ptr.last().unwrap();
 
-    let a_new = if trip_rows.is_empty() {
-        CscMatrix::new(m_new, n_new)
-    } else {
-        match CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_new, n_new) {
-            Ok(a) => a,
-            // Presolve is optional. If finite input overflowed during a transform,
-            // discard the entire transaction and let the solver use the original LP.
-            Err(_) => return Ok(PresolveResult::no_reduction(problem)),
+    // Pass 2: write the output CSC directly, consuming one `col_entries`
+    // column at a time so the dual representation is released in lockstep
+    // with the new matrix being materialized. There is deliberately no
+    // triplet staging array: it used to add a second full copy of the whole
+    // matrix (and a third inside `from_triplets`' own staging) to the
+    // window where the original problem and the dual representation are
+    // still resident. The per-column scratch below is bounded by the
+    // longest single column, not by the matrix. A fully-empty result falls
+    // through the same code path (`total_bound == 0` ⇒ zero-length output
+    // arrays and an all-zero `col_ptr`).
+    let mut row_ind = vec![0usize; total_bound];
+    let mut values = vec![0.0f64; total_bound];
+    let mut col_ptr = Vec::with_capacity(n_new + 1);
+    col_ptr.push(0usize);
+    let mut pos = 0usize;
+    let mut scratch: Vec<(usize, f64)> = Vec::new();
+    let mut j_iter = 0usize;
+    for j in 0..n {
+        if st.removed_cols[j] {
+            continue;
         }
-    };
+        j_iter += 1;
+        debug_assert_eq!(j_iter, col_ptr.len(), "one col_ptr entry per kept column");
+        scratch.clear();
+        std::mem::swap(&mut scratch, &mut st.col_entries[j]);
+        // `pos` must be re-bounded against the pass-1 bound per column in
+        // case pass-1/2 predicates ever diverge; see the vetting note above.
+        debug_assert!(pos <= col_bound_ptr[col_ptr.len() - 1]);
+        scratch.retain(|&(row, val)| !st.removed_rows[row] && val.abs() >= ZERO_TOL);
+        for entry in scratch.iter_mut() {
+            entry.0 = row_map[entry.0].unwrap();
+        }
+        // `from_triplets` emitted columns sorted by row index; keep that
+        // order so downstream column scans see the identical row sequence.
+        scratch.sort_unstable_by_key(|&(row, _)| row);
+        let mut write = 0usize;
+        let mut read = 0usize;
+        while read < scratch.len() {
+            let (row, mut val) = scratch[read];
+            read += 1;
+            while read < scratch.len() && scratch[read].0 == row {
+                val += scratch[read].1;
+                read += 1;
+            }
+            if val.abs() > DROP_TOL {
+                scratch[write] = (row, val);
+                write += 1;
+            }
+        }
+        scratch.truncate(write);
+        for &(row, val) in &scratch {
+            row_ind[pos] = row;
+            values[pos] = val;
+            pos += 1;
+        }
+        #[cfg(test)]
+        super::count_rebuild_scratch_entry(write);
+        col_ptr.push(pos);
+    }
+    row_ind.truncate(pos);
+    values.truncate(pos);
+
+    let a_new = CscMatrix::from_raw_parts(m_new, n_new, col_ptr, row_ind, values);
 
     let reduced_problem = match LpProblem::new_general(
         c_new,

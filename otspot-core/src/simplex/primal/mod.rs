@@ -24,7 +24,6 @@ use super::{
 };
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
-use crate::presolve::LpEquilibration;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::tolerances::*;
 use otspot_num::sparse::CscMatrix;
@@ -784,6 +783,11 @@ pub(crate) fn two_phase_simplex(
     sf: &StandardForm,
     problem: &LpProblem,
     options: &SolverOptions,
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    row_scale: &[f64],
+    col_scale: &[f64],
 ) -> SolverResult {
     let m = sf.m;
     let mut total_iters: usize = 0;
@@ -793,44 +797,28 @@ pub(crate) fn two_phase_simplex(
         sf.m, sf.n_total, sf.num_artificial
     ));
 
-    let (a, b, c, row_scale, col_scale) = if options.use_ruiz_scaling {
-        let Some(scaled) =
-            LpEquilibration::scale_with_deadline(&sf.a, &sf.b, &sf.c, options.deadline)
-        else {
-            trace_stage("equilibration timeout");
-            return SolverResult {
-                status: SolveStatus::Timeout,
-                objective: f64::INFINITY,
-                ..Default::default()
-            };
-        };
-        scaled
-    } else {
-        (
-            sf.a.clone(),
-            sf.b.clone(),
-            sf.c.clone(),
-            vec![1.0; sf.m],
-            vec![1.0; sf.n_total],
-        )
-    };
+    // The scaling triple arrives materialized from the caller
+    // (`legacy_scale_triple` at each entry). Building a second one here used
+    // to co-resident a full matrix copy with the caller's; the values are
+    // identical either way because the equilibration is deterministic and
+    // the non-Ruiz branch is a clone with identity scales.
 
     // Direct Phase II — no artificials needed.
     if sf.num_artificial == 0 {
         trace_stage("direct phase2 start");
         let mut basis = sf.initial_basis.clone();
-        let mut x_b = b.clone();
-        adjust_xb_for_scaled_diag(&a, &basis, &mut x_b, m);
+        let mut x_b = b.to_vec();
+        adjust_xb_for_scaled_diag(a, &basis, &mut x_b, m);
         return finalize_phase2(
             sf,
             problem,
-            &a,
-            &b,
-            &c,
+            a,
+            b,
+            c,
             &mut basis,
             &mut x_b,
-            &col_scale,
-            &row_scale,
+            col_scale,
+            row_scale,
             options,
             &mut total_iters,
         );
@@ -838,7 +826,7 @@ pub(crate) fn two_phase_simplex(
 
     // Phase I + Phase II
     trace_stage("phase1 setup start");
-    let (a_ext, mut basis, mut x_b, c_phase1, n_ext) = build_phase1_system(sf, &a, &b, m, options);
+    let (a_ext, mut basis, mut x_b, c_phase1, n_ext) = build_phase1_system(sf, a, b, m, options);
     trace_stage(format_args!("phase1 setup done n_ext={n_ext}"));
 
     let mut pricing1 = SteepestEdgePricing::new(n_ext);
@@ -847,7 +835,7 @@ pub(crate) fn two_phase_simplex(
         &a_ext,
         &mut x_b,
         &c_phase1,
-        &b,
+        b,
         &mut basis,
         m,
         n_ext,
@@ -866,7 +854,7 @@ pub(crate) fn two_phase_simplex(
             trace_stage(format_args!("phase1 optimal iters={total_iters}"));
             if let Err(result) = verify_phase1_feasibility(
                 &a_ext,
-                &b,
+                b,
                 &c_phase1,
                 &mut basis,
                 &mut x_b,
@@ -883,11 +871,11 @@ pub(crate) fn two_phase_simplex(
                 sf,
                 problem,
                 &a_ext,
-                &b,
-                &c,
+                b,
+                c,
                 &mut basis,
                 &mut x_b,
-                &col_scale,
+                col_scale,
                 m,
                 n_ext,
                 options,
@@ -901,19 +889,19 @@ pub(crate) fn two_phase_simplex(
                 sf,
                 problem,
                 &a_ext,
-                &b,
+                b,
                 &c_phase2,
                 &mut basis,
                 &mut x_b,
-                &col_scale,
-                &row_scale,
+                col_scale,
+                row_scale,
                 options,
                 &mut total_iters,
             )
         }
         SimplexOutcome::Unbounded => {
             trace_stage(format_args!("phase1 unbounded iters={total_iters}"));
-            let farkas = extract_farkas_certificate(&a_ext, &b, &basis, m, sf.n_total, options);
+            let farkas = extract_farkas_certificate(&a_ext, b, &basis, m, sf.n_total, options);
             phase1_infeasibility_verdict(farkas, total_iters, options)
         }
         SimplexOutcome::Timeout(obj1) | SimplexOutcome::Stalled(obj1) => {
@@ -937,7 +925,7 @@ pub(crate) fn two_phase_simplex(
                 let mut y_dummy = vec![0.0_f64; m];
                 if reconcile_final_basis_state(
                     &a_ext,
-                    &b,
+                    b,
                     &c_phase1,
                     &basis,
                     &mut x_b,
@@ -968,11 +956,11 @@ pub(crate) fn two_phase_simplex(
                 sf,
                 problem,
                 &a_ext,
-                &b,
-                &c,
+                b,
+                c,
                 &mut basis,
                 &mut x_b,
-                &col_scale,
+                col_scale,
                 m,
                 n_ext,
                 options,
@@ -985,12 +973,12 @@ pub(crate) fn two_phase_simplex(
                 sf,
                 problem,
                 &a_ext,
-                &b,
+                b,
                 &c_phase2,
                 &mut basis,
                 &mut x_b,
-                &col_scale,
-                &row_scale,
+                col_scale,
+                row_scale,
                 options,
                 &mut total_iters,
             )
