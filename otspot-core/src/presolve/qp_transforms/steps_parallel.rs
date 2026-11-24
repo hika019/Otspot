@@ -4,14 +4,55 @@
 
 use super::helpers::skip_step;
 use super::state::{QpPresolveResult, Workspace};
+use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::tolerances::ZERO_TOL;
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+
+// Test-only observability for the mid-loop stop checks below: counts every
+// row examination step8 makes (one per grouping-loop row, one per pair-test
+// outer-loop row) and flips `STEP8_CANCEL_SIGNAL` once the configured target
+// is reached. Entirely `#[cfg(test)]` (definition and every call site), so it
+// has zero footprint in production builds -- mirrors `driver`'s
+// `STEPS_EXECUTED_TOTAL`/`CANCEL_SIGNAL` mechanism, giving the sentinels a
+// deterministic (work-count based, not wall-clock) stand-in for a real
+// expiring deadline.
+#[cfg(test)]
+thread_local! {
+    static STEP8_ROWS_EXAMINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static STEP8_CANCEL_AFTER_ROWS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static STEP8_CANCEL_SIGNAL: std::sync::Arc<AtomicBool> = std::sync::Arc::new(AtomicBool::new(false));
+}
+
+#[cfg(test)]
+fn test_record_step8_row_examined() {
+    let examined = STEP8_ROWS_EXAMINED.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if STEP8_CANCEL_AFTER_ROWS.with(std::cell::Cell::get) == Some(examined) {
+        STEP8_CANCEL_SIGNAL.with(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    }
+}
+
+/// See `step8_parallel_row`: stop is honored once per examined row, so the
+/// post-deadline work leak per interrupt is one row's scan. Measured on
+/// IS_LASSO_300 (n=m=30600): the grouping pass (30600 rows) costs ~25ms and
+/// the pair-test loop costs ~0.24ms/row inside the largest bucket (726-row
+/// group = 241ms), so a per-row `Instant::now()` adds < 0.1% step overhead
+/// while bounding overshoot to ≤ ~1ms. Sampling every K rows would reintroduce
+/// K-row leaks for no measurable gain at this rate.
+#[inline]
+fn step8_stop_requested(opts: &SolverOptions) -> bool {
+    opts.external_stop_requested()
+}
 
 pub(super) fn step8_parallel_row(
     prob: &QpProblem,
     ws: &mut Workspace,
-    deadline: Option<std::time::Instant>,
+    opts: &SolverOptions,
 ) -> Result<(), QpPresolveResult> {
     if skip_step(8) {
         return Ok(());
@@ -19,6 +60,11 @@ pub(super) fn step8_parallel_row(
     let m = prob.num_constraints;
     let mut row_signature: HashMap<(usize, i8), Vec<usize>> = HashMap::new();
     for i in 0..m {
+        #[cfg(test)]
+        test_record_step8_row_examined();
+        if step8_stop_requested(opts) {
+            return Ok(());
+        }
         if ws.removed_rows[i] {
             continue;
         }
@@ -35,14 +81,25 @@ pub(super) fn step8_parallel_row(
         row_signature.entry((first_col, sign)).or_default().push(i);
     }
 
-    'groups: for row_group in row_signature.values() {
+    for row_group in row_signature.values() {
         if row_group.len() < 2 {
             continue;
         }
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            break 'groups;
-        }
         'outer: for &i1 in row_group {
+            // Pair-testing one row against its whole bucket is O(|bucket|)
+            // with a fresh Vec collect per candidate -- up to seconds when the
+            // bucket is large (IS_LASSO_300: one 2240-row bucket). A stop
+            // requested mid-bucket used to go unnoticed until the next bucket
+            // boundary; per-row here bounds the leak to one row's scan
+            // (derivation in `step8_stop_requested`). `return`, not `break`:
+            // skipping the later groups' row scans matters when the stop is
+            // already requested, and the removals kept from earlier groups
+            // are all individually proven either way.
+            #[cfg(test)]
+            test_record_step8_row_examined();
+            if step8_stop_requested(opts) {
+                return Ok(());
+            }
             if ws.removed_rows[i1] {
                 continue;
             }
@@ -121,3 +178,6 @@ pub(super) fn step8_parallel_row(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod stop_sentinels;

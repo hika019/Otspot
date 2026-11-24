@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3551 testcases, 44 ignored
+# totals: 3553 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -753,6 +753,7 @@ otspot-core	presolve::postsolve::recover_removed_row_dual_tests::nonbinding_le_r
 otspot-core	presolve::postsolve::recover_removed_row_dual_tests::run_postsolve_preserves_timeout_incumbent_without_dual	active
 otspot-core	presolve::postsolve::recover_removed_row_dual_tests::run_postsolve_rejects_short_reduced_dual	active
 otspot-core	presolve::postsolve::recover_removed_row_dual_tests::run_postsolve_rejects_short_reduced_solution	active
+otspot-core	presolve::qp_phase2::qr_stop_sentinels::tests::qr_per_item_stop_checks_bound_the_pre_elimination_leak	active
 otspot-core	presolve::qp_phase2::tests::equality_constraint_qr_detects_inconsistency_amid_large_rhs_cancellation	active
 otspot-core	presolve::qp_phase2::tests::equality_constraint_qr_detects_inconsistent_nonsingleton_triple	active
 otspot-core	presolve::qp_phase2::tests::equality_constraint_qr_detects_inconsistent_nonsingleton_triple_at_1e10_scale	active
@@ -796,6 +797,7 @@ otspot-core	presolve::qp_transforms::finalize::tests::invalid_q_rebuild_rolls_ba
 otspot-core	presolve::qp_transforms::finalize::tests::large_coeff_rescaling_is_skipped_before_ruiz_without_touching_problem	active
 otspot-core	presolve::qp_transforms::finalize::tests::large_coeff_rescaling_still_runs_without_ruiz	active
 otspot-core	presolve::qp_transforms::helpers::tests::is_diagonal_q_relative_threshold_sentinel	active
+otspot-core	presolve::qp_transforms::steps_parallel::stop_sentinels::tests::step8_per_row_stop_checks_bound_the_mid_bucket_leak	active
 otspot-core	presolve::qp_transforms::tests::test_apply_fixed_variable_kahan_accumulation_matches_dd	active
 otspot-core	presolve::qp_transforms::tests::test_empty_row_removal	active
 otspot-core	presolve::qp_transforms::tests::test_fixed_var_removal	active

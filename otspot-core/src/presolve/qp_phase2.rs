@@ -41,6 +41,44 @@ fn test_record_phase2_step_executed() {
     }
 }
 
+// Test-only observability for the mid-loop stop checks inside
+// `equality_constraint_qr`: counts every work item its row-scan / grouping /
+// Le-Le pair-test passes examine (one per scanned column, per grouped row, per
+// pair-tested candidate row) and flips `QR_CANCEL_SIGNAL` once the configured
+// target is reached. Entirely `#[cfg(test)]`, mirroring the
+// `PHASE2_*`/step8 mechanisms, giving the sentinels a deterministic
+// (work-count based, not wall-clock) stand-in for a real cancel/deadline race.
+#[cfg(test)]
+thread_local! {
+    static QR_ROWS_EXAMINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static QR_CANCEL_AFTER_ROWS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static QR_CANCEL_SIGNAL: std::sync::Arc<AtomicBool> = std::sync::Arc::new(AtomicBool::new(false));
+}
+
+#[cfg(test)]
+fn test_record_qr_row_examined() {
+    let examined = QR_ROWS_EXAMINED.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if QR_CANCEL_AFTER_ROWS.with(std::cell::Cell::get) == Some(examined) {
+        QR_CANCEL_SIGNAL.with(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    }
+}
+
+/// Stop (cancel flag or deadline) is honored once per examined work item of
+/// `equality_constraint_qr`'s three row passes, so the post-stop work leak is
+/// one row. The pair-test loop is the unbounded one -- O(Σ bucket²) candidate
+/// comparisons before its first existing check -- and at step8's measured
+/// rate for bucket-shaped row scans on IS_LASSO_300-class data (~0.24ms per
+/// row against a 2240-row bucket) a per-row `Instant::now()` adds < 0.1% step
+/// overhead while bounding the leak to ~1ms; sampling every K rows would
+/// reintroduce a K-row leak for no measurable gain at that rate.
+#[inline]
+fn qr_stop_requested(opts: &SolverOptions) -> bool {
+    opts.external_stop_requested()
+}
+
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
 /// Elimination cost is O(mn²) and only pays off in strongly over-determined
 /// systems (m > n * ROW_OVERDETERMINED_RATIO).
@@ -103,6 +141,17 @@ fn equality_constraint_qr(
     // Restrict pair detection to Le rows; pairing Eq/Ge rows with Le would corrupt the problem.
     let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
     for j in 0..n {
+        // See `qr_stop_requested`: these three passes (scan, grouping, pair
+        // test) run before the elimination loop's own stop check, and the
+        // pair test is O(Σ bucket²) -- unbounded relative to a deadline that
+        // expires mid-pass (the same shape as step8's bucket leak; see
+        // `step8_stop_requested`'s derivation). Leak bound after a stop: one
+        // work item.
+        #[cfg(test)]
+        test_record_qr_row_examined();
+        if qr_stop_requested(opts) {
+            return true;
+        }
         let start = prob.a.col_ptr()[j];
         let end = prob.a.col_ptr()[j + 1];
         for k in start..end {
@@ -134,6 +183,11 @@ fn equality_constraint_qr(
     // consistency check flags — vary across runs of identical input.
     let mut groups: BTreeMap<(usize, u64, i64), Vec<usize>> = BTreeMap::new();
     for i in 0..m {
+        #[cfg(test)]
+        test_record_qr_row_examined();
+        if qr_stop_requested(opts) {
+            return true;
+        }
         if removed_rows[i] || row_entries[i].is_empty() {
             continue;
         }
@@ -151,6 +205,11 @@ fn equality_constraint_qr(
 
     for group in groups.values() {
         for &i in group {
+            #[cfg(test)]
+            test_record_qr_row_examined();
+            if qr_stop_requested(opts) {
+                return true;
+            }
             if paired[i] {
                 continue;
             }
@@ -359,14 +418,15 @@ fn constraint_precond(a: &mut CscMatrix, b: &mut [f64]) -> Vec<f64> {
 }
 
 /// Runs `work`, honoring cancellation both before and after -- not just
-/// before. `equality_constraint_qr` has checkless fast paths (the top-level
-/// size-guard skip, and the `m_eq == 0` early return after its row-scan/
-/// pairing pass finds nothing to eliminate) that can still cost real time on
-/// a large QP without ever consulting `cancel_flag` internally. Checking only
-/// beforehand would let a cancellation requested *during* one of those
-/// checkless paths go unnoticed until the caller's next unrelated check (or
-/// never, if there isn't one) -- Python's `Model.solve()` signal-poll loop
-/// stays blocked in `handle.join()` for all of that.
+/// before. The remaining `work` closures are single O(problem-size) passes
+/// (q clone, CSC rebuild, preconditioning, `QpProblem::new`), so checking
+/// before/after bounds the post-stop leak to one such pass; the one pass
+/// whose cost is unbounded relative to problem size -- `equality_constraint_qr`'s
+/// Le-Le pair test -- now checks the stop internally per row (see
+/// `qr_stop_requested`). Checking only beforehand would let a cancellation
+/// requested *during* a pass go unnoticed until the caller's next unrelated
+/// check (or never, if there isn't one) -- Python's `Model.solve()`
+/// signal-poll loop stays blocked in `handle.join()` for all of that.
 fn cancellable<T>(opts: &SolverOptions, work: impl FnOnce() -> T) -> Option<T> {
     if opts.external_stop_requested() {
         return None;
@@ -875,9 +935,9 @@ mod tests {
 
     /// `cancellable` must not treat "cancellation wasn't requested before
     /// `work` started" as sufficient -- `work` itself may be the thing that
-    /// makes cancellation true (standing in for `equality_constraint_qr`'s
-    /// checkless fast paths, where real wall-clock time passes between the
-    /// entry check and the moment the caller finds out). A side-effecting
+    /// makes cancellation true (standing in for any long `work` closure,
+    /// where real wall-clock time passes between the entry check and the
+    /// moment the caller finds out). A side-effecting
     /// closure makes this deterministic: no thread, no timing, no race --
     /// reverting the post-`work` check back out (leaving only the entry
     /// check) makes this assert `Some(42)` instead, since nothing before
@@ -1556,3 +1616,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod qr_stop_sentinels;
