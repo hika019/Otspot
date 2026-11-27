@@ -97,7 +97,10 @@ pub(crate) fn solve_with_split(
         // 未完成成分があるまま Optimal を主張してはいけないため、ここで
         // 集まった結果を join せず Timeout を返す。
         if options.external_stop_requested() {
-            return no_claim_result(SolveStatus::Timeout, f64::INFINITY, k, &results);
+            let mut r = no_claim_result(SolveStatus::Timeout, f64::INFINITY, k, &results);
+            // mint した Timeout は deadline 起因そのもの (results が空でも flag は真)。
+            r.stats.deadline_triggered = true;
+            return r;
         }
         let result = match sub {
             SubLp::Box { cols } => solve_box_component(problem, cols),
@@ -147,12 +150,9 @@ pub(crate) fn solve_as_lp_via_split(
     let mut results: Vec<SolverResult> = Vec::with_capacity(k);
     for sub in &subs {
         if options.external_stop_requested() {
-            return Some(no_claim_result(
-                SolveStatus::Timeout,
-                f64::INFINITY,
-                k,
-                &results,
-            ));
+            let mut r = no_claim_result(SolveStatus::Timeout, f64::INFINITY, k, &results);
+            r.stats.deadline_triggered = true;
+            return Some(r);
         }
         let result = match sub {
             SubLp::Box { cols } => solve_box_component(lp, cols),
@@ -559,6 +559,10 @@ fn join_stats(k: usize, results: &[SolverResult]) -> SolveStats {
     SolveStats {
         lp_split_components: k,
         bounded_eq_ub_path: results.iter().any(|r| r.stats.bounded_eq_ub_path),
+        // 不変条件「status == Timeout ⇒ deadline_triggered」は join でも保つ:
+        // 副 solve が deadline で打ち切られたら結合結果も flag を立てる
+        // (`diag_deadline_small_lp` が public 経路で固定している)。
+        deadline_triggered: results.iter().any(|r| r.stats.deadline_triggered),
         ..Default::default()
     }
 }
