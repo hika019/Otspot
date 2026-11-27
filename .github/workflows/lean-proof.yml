@@ -1,0 +1,55 @@
+name: Lean proofs
+# The lean/ lake project is self-contained (no Mathlib; own OrderedField class
+# whose axioms are restricted to facts valid over the reals — see
+# lean/README.md). Two gates: (1) `lake build` with zero warnings-as-errors is
+# the compile check; (2) no `sorry` in any .lean source; (3) #print axioms on
+# the main theorems must depend only on the three stock Lean axioms
+# (propext / Classical.choice / Quot.sound) — a custom global axiom would
+# mean a theorem was smuggled in as an assumption.
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+
+jobs:
+  lake:
+    name: lake build + sorry/axiom audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install elan (toolchain from lean/lean-toolchain)
+        run: |
+          curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: lake build
+        working-directory: lean
+        run: lake build
+      - name: No sorry in sources
+        run: |
+          if grep -rn --include='*.lean' -E '(^|[[:space:]])sorry([[:space:]]|$|[();])' lean; then
+            echo "::error::sorry found in lean/ sources"
+            exit 1
+          fi
+      - name: Axiom audit (stock axioms only)
+        working-directory: lean
+        run: |
+          cat > /tmp/axioms.lean <<'EOF'
+          import LeanProofs
+          #print axioms LeanProofs.feasible_iff
+          #print axioms LeanProofs.objective_additive
+          #print axioms LeanProofs.opt_decomposition
+          #print axioms LeanProofs.status_infeasible_rule
+          #print axioms LeanProofs.status_unbounded_rule
+          #print axioms LeanProofs.status_optimal_rule
+          #print axioms LeanProofs.Fbbt.interval_mul_upper
+          #print axioms LeanProofs.Fbbt.interval_mul_lower
+          #print axioms LeanProofs.Fbbt.quad_lower_bound
+          #print axioms LeanProofs.Fbbt.bound_from_quad
+          EOF
+          lake env lean /tmp/axioms.lean > /tmp/axioms.out
+          cat /tmp/axioms.out
+          if grep -vE "depends on axioms: \[(propext|Classical\.choice|Quot\.sound)(, (propext|Classical\.choice|Quot\.sound))*\]$|does not depend on any axioms" /tmp/axioms.out | grep -v '^$'; then
+            echo "::error::unexpected axiom dependency (stock propext/Classical.choice/Quot.sound only)"
+            exit 1
+          fi
