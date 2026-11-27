@@ -1133,6 +1133,43 @@ fn test_forcing_tiny_coefficient_scale_genuine_still_forces() {
     );
 }
 
+/// sentinel: restoring the PR #89 P1 margin formula
+/// (`FORCING_SLACK_REL_TOL · scale + movement`) gives this row a margin of
+/// ≈1.28e-9 (scale ≈ 2e4 → scale-term 2.84e-10, movement-term 1e-9) against
+/// a real slack of 5e-10, so the row false-forces both members to their
+/// lower endpoints and the `ForcingRow`-absence assertion FAILS.
+/// (pilot87 class: on the real file the same term reached O(10²..10⁵) and a
+/// later pass turned the pin chain into a false Infeasible.)
+#[test]
+fn test_forcing_large_scale_row_with_real_slack_is_not_forcing() {
+    // 1000x + 1000y ≤ 5e-10 over x, y ∈ [0, 10]: the feasible sliver
+    // x + y ≤ 5e-13 is genuine (exact multiples of the endpoint ulp at this
+    // magnitude — ulp(5e-10) ≈ 1e-25, so the slack is ten orders of
+    // magnitude above the activity-sum fp error). Forcing may consume at
+    // most ZERO_TOL absolute slack or the cheapest member move, whichever
+    // is smaller: min(1e-12, 1e-9) = 1e-12 < 5e-10 → the row must survive
+    // unpinned.
+    let lp = make_lp_general(
+        vec![-1.0, -1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1000.0, 1000.0],
+        1,
+        2,
+        vec![5e-10],
+        vec![ConstraintType::Le],
+        vec![(0.0, 10.0), (0.0, 10.0)],
+    );
+    let result = run_presolve(&lp, None).unwrap();
+    assert!(
+        !result
+            .postsolve_stack
+            .iter()
+            .any(|s| matches!(s, PostsolveStep::ForcingRow { .. })),
+        "a 5e-10 real slack at activity scale 2e4 must not pin both members (pilot87 false-forcing class)"
+    );
+}
+
 // -----------------------------------------------------------
 // P1-1: ForcingRow dual recovery with prior FixedVariable
 // -----------------------------------------------------------
