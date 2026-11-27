@@ -1,0 +1,9 @@
+{"plugins": [],
+ "package": "otspot_reduction_proofs",
+ "options": {},
+ "name": "LeanProofs.Fbbt",
+ "isModule": false,
+ "importArts":
+ {"LeanProofs.OrderedField":
+  [["/home/whisky/develop/Otspot-wt/split/lean/.lake/build/lib/lean/LeanProofs/OrderedField.olean"]]},
+ "dynlibs": []}

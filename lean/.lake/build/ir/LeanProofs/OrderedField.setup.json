@@ -1,0 +1,7 @@
+{"plugins": [],
+ "package": "otspot_reduction_proofs",
+ "options": {},
+ "name": "LeanProofs.OrderedField",
+ "isModule": false,
+ "importArts": {},
+ "dynlibs": []}

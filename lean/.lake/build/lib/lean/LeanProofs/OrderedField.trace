@@ -1,0 +1,31 @@
+{"synthetic": false,
+ "schemaVersion": "2025-09-10",
+ "outputs":
+ {"o": ["f7c159508eda20bc.olean"],
+  "m": false,
+  "i": "cab239127d677474.ilean",
+  "c": "9ae9803ef8c38ddc.c"},
+ "log":
+ [{"message":
+   ".> LEAN_PATH=/home/whisky/develop/Otspot-wt/split/lean/.lake/build/lib/lean /home/whisky/.elan/toolchains/leanprover--lean4---v4.36.0/bin/lean /home/whisky/develop/Otspot-wt/split/lean/LeanProofs/OrderedField.lean -o /home/whisky/develop/Otspot-wt/split/lean/.lake/build/lib/lean/LeanProofs/OrderedField.olean -i /home/whisky/develop/Otspot-wt/split/lean/.lake/build/lib/lean/LeanProofs/OrderedField.ilean -c /home/whisky/develop/Otspot-wt/split/lean/.lake/build/ir/LeanProofs/OrderedField.c --setup /home/whisky/develop/Otspot-wt/split/lean/.lake/build/ir/LeanProofs/OrderedField.setup.json --json",
+   "level": "trace"}],
+ "inputs":
+ [["deps",
+   [["otspot_reduction_proofs/LeanProofs:extraDep",
+     [["@otspot_reduction_proofs:extraDep", "00000000000006bb"]]],
+    ["imports", "00000000000006bb"]]],
+  ["libs",
+   [["import dynlibs", "00000000000006bb"],
+    ["package external libraries", "00000000000006bb"],
+    ["module dynlibs", "00000000000006bb"],
+    ["module plugins", "00000000000006bb"]]],
+  ["Lean 4.36.0, commit 611c117bfaf7b7ae1cfcf246ce6fba31e8f509e9",
+   "bd5dd4b1191d6a49"],
+  ["/home/whisky/develop/Otspot-wt/split/lean/LeanProofs/OrderedField.lean",
+   "5acd933a86b4612f"],
+  ["options", "00000000000006bb"],
+  ["isModule: false", "feefd2a0d3a1847e"],
+  ["Module.name: LeanProofs.OrderedField", "d032e6a0cefc8573"],
+  ["Package.id?: (some otspot_reduction_proofs)", "0c7aa267b257d4a6"],
+  ["Module.leanArgs: #[]", "00000000000006bb"]],
+ "depHash": "c48583e2fecace0a"}
