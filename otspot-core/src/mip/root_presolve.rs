@@ -457,36 +457,33 @@ fn activity_margin(scale: f64) -> f64 {
     ROOT_PRESOLVE_ACT_ABS_TOL + ROOT_PRESOLVE_ACT_REL_TOL * scale
 }
 
-/// Coefficient-aware margin for the **forcing** decision on one side
-/// (`at_min` = the min-activity endpoint). Pinning a member to its
-/// activity endpoint is sound only when no *distinct* f64 point of that
-/// member's interval keeps the row feasible: moving member `j` one
-/// representable step into its interval raises the row activity by
-/// `|a_j| · δ`, and the smallest step representable AT THAT ENDPOINT is
-/// `PIN_TOL + k · EPSILON · |endpoint_j|` — the same ULP budget
-/// [`is_pinned`] uses to call a width real, evaluated at the endpoint the
-/// pin would write (`at_min` selects the side; the opposite, possibly
-/// infinite bound plays no role here — it is never the landing point).
-/// The row forces only when the slack cannot pay even the cheapest such
-/// move: `slack ≤ min_j |a_j|·quantum_j`, plus the rounding budget of the
-/// activity sum itself (`REL · scale`, the [`ROOT_PRESOLVE_ROUNDING_ULPS`]
-/// rationale scaled to a whole sum — without it a genuinely forcing row
-/// whose `min_act` carries accumulation error could never decide at large
-/// magnitude). A scale-free constant fails at BOTH ends: the original
-/// `1e-9 · scale` read rows with slack 4 at 1e9 magnitude as forcing
-/// (finding F2), and its replacement — the absolute 1e-9 — is *5× an
-/// entire row* at 1e-10 coefficient scale, turning that row's redundant
-/// rows into endpoint pins (PR #89 P1 small-scale finding:
-/// `1e-10·x + 1e-10·y ≤ 2e-10` with binary x, y pinned both to 0 and
-/// published Optimal obj 0 against the true −2 at (1, 1)). Both failures
-/// are the same decision comparing a row slack to a quantity unrelated to
-/// the row's own coefficients.
-fn forcing_margin(
-    entries: &[(usize, f64)],
-    bounds: &[(f64, f64)],
-    scale: f64,
-    at_min: bool,
-) -> f64 {
+/// Margin for the **forcing** decision on one side (`at_min` = the
+/// min-activity endpoint): `min(ROOT_PRESOLVE_ACT_ABS_TOL, min_j
+/// |a_j|·quantum_j)` where `quantum_j = PIN_TOL + k·EPSILON·|endpoint_j|`
+/// is the cheapest representable in-interval move of member `j` at the
+/// endpoint the pin would write (mirrors [`is_pinned`]'s ULP budget; the
+/// opposite, possibly infinite bound plays no role here). Pinning is sound
+/// only when no *distinct* f64 point of that member's interval keeps the
+/// row feasible, so the row forces only when the slack cannot pay even the
+/// cheapest such move — and never more absolute slack than the historical
+/// [`ROOT_PRESOLVE_ACT_ABS_TOL`] cap.
+///
+/// The margin deliberately has NO activity-scale term. PR #89 P1 shipped
+/// `REL·scale + movement`; the LP twin of that formula false-forced
+/// pilot87-class rows whose activity terms reach 1e16..1e18 (margin
+/// O(10²..1e5) truncated genuine slivers, and a later pass threw a false
+/// Infeasible — first-bad `43b5494e`, same rule, same defect). The error
+/// scale of evaluating the activity sum bounds what we may *conclude about*
+/// the slack, not how much feasible slack may be *truncated*: when rounding
+/// error swallows the slack, the sound conclusion is "forcing is
+/// undecidable — skip". Genuinely forcing rows carry zero slack and keep
+/// deciding at any magnitude. The small-scale half of #89 P1 stands — the
+/// absolute `1e-9` is 5× an entire row at `1e-10` coefficient scale and
+/// false-pins members off the true optimum (`1e-10·x + 1e-10·y ≤ 2e-10`
+/// with binary x, y pinned both to 0 against the true −2 at (1, 1)). The
+/// F2 finding (scale-inflated `1e-9·scale` reading slack 4 at 1e9 magnitude
+/// as forcing) is structurally excluded by the cap.
+fn forcing_margin(entries: &[(usize, f64)], bounds: &[(f64, f64)], at_min: bool) -> f64 {
     let quantum = entries
         .iter()
         .map(|&(j, a)| {
@@ -509,7 +506,7 @@ fn forcing_margin(
     // written (`force_endpoints` returns `None` for the caller), so the
     // movement term drops out of the gate entirely.
     let movement = if quantum.is_finite() { quantum } else { 0.0 };
-    ROOT_PRESOLVE_ACT_REL_TOL * scale + movement
+    movement.min(ROOT_PRESOLVE_ACT_ABS_TOL)
 }
 
 /// Min/max activity of a row over the current box. `None` when the needed
@@ -813,7 +810,7 @@ impl RedState {
                         // mirror damage at small coefficient scale, where
                         // 1e-9 is larger than the entire row (P1).
                         let forcing =
-                            rhs - min_act <= forcing_margin(&entries, &self.bounds, scale, true);
+                            rhs - min_act <= forcing_margin(&entries, &self.bounds, true);
                         if !forcing || self.force_endpoints(&entries, true, &mut changed).is_some()
                         {
                             self.rows[i].alive = false;
@@ -831,7 +828,7 @@ impl RedState {
                         // below the max-activity endpoint measured against
                         // the same [`forcing_margin`] (max-activity side).
                         let forcing =
-                            max_act - rhs <= forcing_margin(&entries, &self.bounds, scale, false);
+                            max_act - rhs <= forcing_margin(&entries, &self.bounds, false);
                         if !forcing
                             || self
                                 .force_endpoints(&entries, false, &mut changed)
@@ -858,9 +855,9 @@ impl RedState {
                     // members at an endpoint whose activity misses the rhs
                     // by up to 2·tol and drops feasible points.
                     let lo_force = (min_act - rhs).abs()
-                        <= forcing_margin(&entries, &self.bounds, scale, true);
+                        <= forcing_margin(&entries, &self.bounds, true);
                     let hi_force = (max_act - rhs).abs()
-                        <= forcing_margin(&entries, &self.bounds, scale, false);
+                        <= forcing_margin(&entries, &self.bounds, false);
                     if lo_force || hi_force {
                         // Pin the extreme that equals the rhs; if both do
                         // (window collapsed onto it), prefer the closer.
@@ -2196,10 +2193,12 @@ mod tests {
     // (`tiny_coefficient_redundant_row_does_not_force_endpoints`) lives in
     // `otspot-core/tests/milp_forcing_margin_sentinel.rs` (public solver
     // path, sentinel-gate overlayable); its unmarked pin-level twin is at
-    // the end of this module. A scale-free constant cannot separate "slack
-    // is rounding noise" from "slack is the whole row": the forcing margin
-    // must scale with the row's own [`forcing_margin`] (the per-member
-    // movement floor plus the activity sum's rounding budget).
+    // the end of this module. A bare absolute constant cannot separate
+    // "slack is the whole row" from "slack is tolerance": the forcing
+    // margin gates on the row's own [`forcing_margin`] (the per-member
+    // movement floor), capped at the historical absolute term — no
+    // activity-scale term, which on the LP twin false-forced pilot87-class
+    // rows (first-bad `43b5494e`) and is structurally excluded.
 
     /// Over-tightening control (twin of the F1/F2 controls): GENUINE
     /// forcing — zero-slack single-point rows of scale 1 and 1e-10 — keeps

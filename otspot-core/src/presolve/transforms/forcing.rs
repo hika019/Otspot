@@ -5,34 +5,38 @@ use super::state::{PostsolveStep, PresolveState, PresolveStatus};
 use crate::problem::ConstraintType;
 use crate::tolerances::ZERO_TOL;
 
-/// Relative rounding budget for the forcing decision: the activity-range
-/// endpoint is a floating-point sum over the row's terms, so the slack a
-/// forcing test may accept must scale with the row's own magnitude
-/// (k·2⁻⁵³ accumulation with ~2 digits of safety; the twin of the MILP
-/// root presolve's `ROOT_PRESOLVE_ACT_REL_TOL`). A scale-free constant
-/// fails at both ends — see [`forcing_margin`] and the PR #89 P1 finding
-/// in `mip::root_presolve` (`1e-13`-scale rows below read as forcing when
-/// ZERO_TOL alone gates the slack).
-const FORCING_SLACK_REL_TOL: f64 = 64.0 * f64::EPSILON;
-
 /// ULP coefficient of the per-member movement floor (twin of
 /// `ROOT_PRESOLVE_ROUNDING_ULPS`).
 const FORCING_MOVE_ULPS: f64 = 4.0;
 
-/// Coefficient-aware forcing margin for one side (`at_min` = force toward
-/// the min-activity endpoints): the slack must not even pay for the
-/// cheapest representable in-interval move of any member —
-/// `min_j |a_j|·(ZERO_TOL + k·EPSILON·|endpoint_j|)`, the endpoint being
-/// the bound the pin would write for that member — plus the rounding
-/// budget of the activity sum itself (`FORCING_SLACK_REL_TOL · scale`).
-/// Mirrors `mip::root_presolve::forcing_margin` (same rationale,
-/// documented there). NOTE: the infeasibility test in [`step2b_forcing_row`]
-/// deliberately keeps the plain `ZERO_TOL` gate — loosening it would trade
-/// false-Infeasible claims for published points violating exactly-evaluable
-/// rows; its sound scale-aware form needs an exact activity-evaluation
-/// analysis (separate finding).
-fn forcing_margin(active: &[(usize, f64)], bounds: &[(f64, f64)], rhs: f64, at_min: bool) -> f64 {
-    let mut scale = rhs.abs();
+/// Forcing margin for one side (`at_min` = force toward the min-activity
+/// endpoints): `min(ZERO_TOL, min_j |a_j|·(ZERO_TOL + k·EPSILON·|endpoint_j|))`
+/// — never more absolute slack than the historical scale-free `ZERO_TOL`,
+/// and never more than the cheapest representable in-interval move of any
+/// member (the endpoint being the bound the pin would write). The small-scale
+/// half is the PR #89 P1 finding: an absolute `1e-12` is *5× an entire row*
+/// at `1e-11` coefficient scale and false-pins members off the true optimum
+/// (see `test_forcing_tiny_coefficient_scale_is_not_forcing`).
+///
+/// The margin deliberately has NO activity-scale term. PR #89 P1 shipped
+/// `64·EPSILON·(‖rhs‖ + Σ|a_j|·max‖bounds_j‖) + movement`; on pilot87-class
+/// rows whose activity terms reach 1e16..1e18 that term grows to O(10²..10⁵)
+/// and truncated genuine feasible slivers (row misses of 13.8..11822 read as
+/// "forcing", every member pinned, a later pass threw the false
+/// `PresolveStatus::Infeasible` — first-bad `43b5494e`). The error scale of
+/// evaluating the activity sum bounds what we may *conclude about* the
+/// slack; it never bounds how much feasible slack may be *truncated*. When
+/// rounding error swallows the slack, the sound conclusion is "forcing is
+/// undecidable here — skip", not "pin everything". Dropping the term makes
+/// the margin ≤ the pre-#89 `ZERO_TOL` cap structurally: genuinely forcing
+/// rows at huge magnitudes lose the reduction (conservative, correct), and
+/// no row can ever be pinned on a wider slack than before #89.
+/// NOTE: the infeasibility test in [`step2b_forcing_row`] deliberately keeps
+/// the plain `ZERO_TOL` gate — loosening it would trade false-Infeasible
+/// claims for published points violating exactly-evaluable rows; its sound
+/// scale-aware form needs an exact activity-evaluation analysis (separate
+/// finding).
+fn forcing_margin(active: &[(usize, f64)], bounds: &[(f64, f64)], at_min: bool) -> f64 {
     let mut quantum = f64::INFINITY;
     for &(j, a) in active {
         let (lb, ub) = bounds[j];
@@ -43,12 +47,11 @@ fn forcing_margin(active: &[(usize, f64)], bounds: &[(f64, f64)], rhs: f64, at_m
         }
         // The bound the pin would write for this member.
         let endpoint = if (a > 0.0) == at_min { lb } else { ub };
-        scale += a.abs() * lb.abs().max(ub.abs());
         quantum =
             quantum.min(a.abs() * (ZERO_TOL + FORCING_MOVE_ULPS * f64::EPSILON * endpoint.abs()));
     }
     let movement = if quantum.is_finite() { quantum } else { 0.0 };
-    FORCING_SLACK_REL_TOL * scale + movement
+    movement.min(ZERO_TOL)
 }
 
 pub(super) fn step2b_forcing_row(
@@ -87,17 +90,17 @@ pub(super) fn step2b_forcing_row(
         }
 
         // Forcing: the activity bound equals rhs, so all variables are at their
-        // contributing bounds. The equality must hold within a margin that
-        // scales with the row itself ([`forcing_margin`] at
-        // `mip::root_presolve` for the full rationale): a scale-free
-        // ZERO_TOL false-forces rows whose every coefficient is below it,
-        // pinning members off the true optimum (PR #89 P1 class).
+        // contributing bounds. The equality must hold within the pin-tolerance
+        // margin of [`forcing_margin`] — at most the historical scale-free
+        // `ZERO_TOL`, tightened to the cheapest member move at small
+        // coefficient scale (PR #89 P1 class; the large-scale half of that PR's
+        // formula is reverted here — see [`forcing_margin`]).
         // - Le: a_min >= b - margin (min already reaches rhs)
         // - Ge: a_max <= b + margin (max already reaches rhs)
         // - Eq: either side may force (infeasibility already excluded above
         //   bounds the miss distance of the chosen side by the margin).
-        let lo_force = lb_fin && rhs - row_lb <= forcing_margin(&active, &st.bounds, rhs, true);
-        let hi_force = ub_fin && row_ub - rhs <= forcing_margin(&active, &st.bounds, rhs, false);
+        let lo_force = lb_fin && rhs - row_lb <= forcing_margin(&active, &st.bounds, true);
+        let hi_force = ub_fin && row_ub - rhs <= forcing_margin(&active, &st.bounds, false);
         let forcing = match ct {
             ConstraintType::Le => lo_force,
             ConstraintType::Ge => hi_force,
