@@ -475,14 +475,13 @@ fn activity_margin(scale: f64) -> f64 {
 /// Infeasible — first-bad `43b5494e`, same rule, same defect). The error
 /// scale of evaluating the activity sum bounds what we may *conclude about*
 /// the slack, not how much feasible slack may be *truncated*: when rounding
-/// error swallows the slack, the sound conclusion is "forcing is
-/// undecidable — skip". Genuinely forcing rows carry zero slack and keep
-/// deciding at any magnitude. The small-scale half of #89 P1 stands — the
-/// absolute `1e-9` is 5× an entire row at `1e-10` coefficient scale and
-/// false-pins members off the true optimum (`1e-10·x + 1e-10·y ≤ 2e-10`
-/// with binary x, y pinned both to 0 against the true −2 at (1, 1)). The
-/// F2 finding (scale-inflated `1e-9·scale` reading slack 4 at 1e9 magnitude
-/// as forcing) is structurally excluded by the cap.
+/// error swallows the slack, forcing is undecidable — skip. Genuinely
+/// forcing rows carry zero slack and keep deciding at any magnitude. The
+/// small-scale half of #89 P1 stands — the absolute `1e-9` is 5× an entire
+/// row at `1e-10` coefficient scale (`1e-10·x + 1e-10·y ≤ 2e-10` with binary
+/// x, y pinned both to 0 against the true −2 at (1, 1)); the F2 finding
+/// (scale-inflated `1e-9·scale` reading slack 4 at 1e9 magnitude as forcing)
+/// is structurally excluded by the cap.
 fn forcing_margin(entries: &[(usize, f64)], bounds: &[(f64, f64)], at_min: bool) -> f64 {
     let quantum = entries
         .iter()
@@ -809,8 +808,7 @@ impl RedState {
                         // (F2); the previous absolute 1e-9 then did the
                         // mirror damage at small coefficient scale, where
                         // 1e-9 is larger than the entire row (P1).
-                        let forcing =
-                            rhs - min_act <= forcing_margin(&entries, &self.bounds, true);
+                        let forcing = rhs - min_act <= forcing_margin(&entries, &self.bounds, true);
                         if !forcing || self.force_endpoints(&entries, true, &mut changed).is_some()
                         {
                             self.rows[i].alive = false;
@@ -854,10 +852,10 @@ impl RedState {
                     // whenever both sides were within `tol`) puts the
                     // members at an endpoint whose activity misses the rhs
                     // by up to 2·tol and drops feasible points.
-                    let lo_force = (min_act - rhs).abs()
-                        <= forcing_margin(&entries, &self.bounds, true);
-                    let hi_force = (max_act - rhs).abs()
-                        <= forcing_margin(&entries, &self.bounds, false);
+                    let lo_force =
+                        (min_act - rhs).abs() <= forcing_margin(&entries, &self.bounds, true);
+                    let hi_force =
+                        (max_act - rhs).abs() <= forcing_margin(&entries, &self.bounds, false);
                     if lo_force || hi_force {
                         // Pin the extreme that equals the rhs; if both do
                         // (window collapsed onto it), prefer the closer.

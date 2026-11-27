@@ -20,17 +20,15 @@ const FORCING_MOVE_ULPS: f64 = 4.0;
 ///
 /// The margin deliberately has NO activity-scale term. PR #89 P1 shipped
 /// `64·EPSILON·(‖rhs‖ + Σ|a_j|·max‖bounds_j‖) + movement`; on pilot87-class
-/// rows whose activity terms reach 1e16..1e18 that term grows to O(10²..10⁵)
-/// and truncated genuine feasible slivers (row misses of 13.8..11822 read as
-/// "forcing", every member pinned, a later pass threw the false
-/// `PresolveStatus::Infeasible` — first-bad `43b5494e`). The error scale of
-/// evaluating the activity sum bounds what we may *conclude about* the
-/// slack; it never bounds how much feasible slack may be *truncated*. When
-/// rounding error swallows the slack, the sound conclusion is "forcing is
-/// undecidable here — skip", not "pin everything". Dropping the term makes
-/// the margin ≤ the pre-#89 `ZERO_TOL` cap structurally: genuinely forcing
-/// rows at huge magnitudes lose the reduction (conservative, correct), and
-/// no row can ever be pinned on a wider slack than before #89.
+/// rows (activity terms 1e16..1e18) that term reached O(10²..10⁵), truncated
+/// genuine slivers (misses 13.8..11822 read as "forcing", every member
+/// pinned, a later pass threw a false `PresolveStatus::Infeasible`;
+/// first-bad `43b5494e`). The error scale of evaluating the activity sum
+/// bounds what we may *conclude about* the slack, never how much feasible
+/// slack may be *truncated*: when rounding error swallows the slack, forcing
+/// is undecidable here — skip, don't pin. With the term dropped the margin ≤
+/// the pre-#89 `ZERO_TOL` cap structurally, yet zero-slack rows still force
+/// at any magnitude.
 /// NOTE: the infeasibility test in [`step2b_forcing_row`] deliberately keeps
 /// the plain `ZERO_TOL` gate — loosening it would trade false-Infeasible
 /// claims for published points violating exactly-evaluable rows; its sound
