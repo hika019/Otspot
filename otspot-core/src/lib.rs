@@ -30,6 +30,7 @@ pub mod conic;
 #[doc(hidden)]
 pub mod linalg;
 pub mod lp;
+pub(crate) mod lp_split;
 pub mod mip;
 pub mod qp;
 pub mod sensitivity;

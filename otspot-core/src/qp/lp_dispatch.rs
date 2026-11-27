@@ -80,6 +80,29 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
         }
     };
 
+    // 独立連結成分分割をルート選択より前に試みる (LP 直入口は solve_lp_with の
+    // 内側で実施済み)。成分は solve_as_lp へ再帰し、成分ごとの presolve / LP-IPM
+    // ルート選択を再判定させる。この順序が本質: wide 条件で lp-ipm へ直通した
+    // 問題は分割に到達せず、実測 fome13 (8 成分) は全体 lp-ipm のまま
+    // 900s TIMEOUT になった。分割後は成分単位で幅比が落ち、ルート選択が
+    // 小さい問題でやり直される。不发火は None を返し、以下の従来経路が
+    // そのまま走る (lp_split::solve_as_lp_via_split の doc 参照)。
+    //
+    // テスト専用フック (INJECT_REDUCED_TIMEOUT_QP) は reduced 経路内部の
+    // iters 伝播を検証する device で、分割ラッパより内側を通らなければ
+    // 意味をなさない。フック点灯時は分割を迂回する (本番挙動には無関係)。
+    #[cfg(test)]
+    let split_enabled = !INJECT_REDUCED_TIMEOUT_QP.with(|v| v.get());
+    #[cfg(not(test))]
+    let split_enabled = true;
+    if split_enabled {
+        if let Some(result) =
+            crate::lp_split::solve_as_lp_via_split(problem, options, &lp, solve_as_lp)
+        {
+            return result;
+        }
+    }
+
     if options.presolve && should_try_lp_ipm(&lp, options) {
         let mut no_presolve_opts = options.clone();
         no_presolve_opts.presolve = false;
@@ -546,7 +569,7 @@ fn solve_original_lp_direct_retry(lp: &LpProblem, options: &SolverOptions) -> So
     crate::lp::solve_lp_forwarded_from_qp(lp, &retry_opts)
 }
 
-fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
+pub(crate) fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
     // Stalled / MaxIterations の objective は診断値だが、offset を欠くと bench の
     // gap 診断が原点ずれするため solution を持つ status には一律加算する。
     if matches!(

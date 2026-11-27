@@ -120,6 +120,12 @@ pub struct SolveStats {
     /// Removing the verification gate flips `false` conclusions back to
     /// unverified hard verdicts, which the gate exists to prevent.
     pub unbounded_ray_certified: bool,
+    /// LP 入口の独立連結成分分割が実際に求解した成分数。0 は分割不发火
+    /// (単一成分、warm start / 初期 basis / presolve=false ガード発動、
+    /// support 空行あり)。2 以上は LP を k 成分に分解して結合したことを
+    /// 意味する (`lp_split` の結合規則表参照)。発火観測用の診断 field で、
+    /// 求解意味・数値結果には影響しない。
+    pub lp_split_components: usize,
     /// 返された `Infeasible` status が IPM 検出器の受理点 (`ippmm::iter`) での
     /// 双対方向 dy に対する独立検証 `verify_infeasible_farkas` (Farkas 代替定理
     /// = 実行可能集合が空であることの証書) を通過したときのみ `true`。
