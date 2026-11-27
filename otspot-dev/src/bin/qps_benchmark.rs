@@ -249,6 +249,12 @@ fn append_route_stats(mut note: String, result: &SolverResult) -> String {
         }
         note.push_str("bounded_eq_ub=1");
     }
+    if result.stats.lp_split_components >= 2 {
+        if !note.is_empty() {
+            note.push(' ');
+        }
+        note.push_str(&format!("lp_split={}", result.stats.lp_split_components));
+    }
     note
 }
 

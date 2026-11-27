@@ -26,7 +26,10 @@ pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResu
     // (a raw timeout_secs-only option set is clock-blind at this layer).
     let materialized = options.materialize_deadline();
     let options = materialized.as_ref().unwrap_or(options);
-    let mut result = crate::simplex::solve_with(problem, options);
+    // 独立連結成分分割が効くときのみ分解求解し、単一成分・ガード発動時は
+    // `simplex::solve_with` をそのまま通す (lp_split の doc 参照)。直入口は
+    // sensitivity の presolve=false 規約を守る (lp_split::solve_with_split)。
+    let mut result = crate::lp_split::solve_with_split(problem, options, true);
     if matches!(
         result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
@@ -110,7 +113,9 @@ pub(crate) fn solve_lp_forwarded_from_qp(
 ) -> SolverResult {
     let materialized = options.materialize_deadline();
     let options = materialized.as_ref().unwrap_or(options);
-    let mut result = crate::simplex::solve_with(problem, options);
+    // 転送経路は lp_dispatch が段分工順上 presolve を落とすため、直入口の
+    // sensitivity ガードは適用しない (lp_split::solve_with_split の doc 参照)。
+    let mut result = crate::lp_split::solve_with_split(problem, options, false);
     if matches!(
         result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout

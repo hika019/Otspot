@@ -1,0 +1,3 @@
+# lake build outputs are not tracked
+.lake/
+build/

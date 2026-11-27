@@ -2,7 +2,7 @@
 # Regenerate after adding/removing/ignoring any test: python3 scripts/lib/check_new_ignore_attrs.py --update
 # config: profile=release features=parallel target=host-default
 # tools: nextest=0.9.137 rustc=1.95.0  (diagnostic only; not compared)
-# totals: 3553 testcases, 44 ignored
+# totals: 3570 testcases, 44 ignored
 # columns: <binary-id> \t <test-name> \t <ignored|active>
 # 'ignored' is the cfg-evaluated result for the config above;
 # regenerating under a different profile/feature/target will diff.
@@ -272,6 +272,11 @@ otspot-core	lp::tests::le_only_nonzero_lb_objective_correct	active
 otspot-core	lp::tests::lp_empty_box_lb_gt_ub_is_infeasible	active
 otspot-core	lp::tests::max_iters_is_honored_by_the_real_solver_end_to_end	active
 otspot-core	lp::tests::test_lp_timeout_incumbent_includes_obj_offset	active
+otspot-core	lp_split::tests::box_component_closed_form_matches_hand_computed	active
+otspot-core	lp_split::tests::join_table_rules	active
+otspot-core	lp_split::tests::plan_none_for_single_component	active
+otspot-core	lp_split::tests::plan_skips_empty_support_rows_and_warm_start	active
+otspot-core	lp_split::tests::plan_two_components_and_row_assignment	active
 otspot-core	mip::branch::tests::branch_bounds_can_produce_empty_box_for_pruning	active
 otspot-core	mip::branch::tests::branch_bounds_floor_and_ceil	active
 otspot-core	mip::branch::tests::default_branching_is_reliability	active
@@ -2141,6 +2146,18 @@ otspot-core::linalg_par_sentinel	ipm_threads_1_par_seq_budget_sentinel	active
 otspot-core::linalg_par_sentinel	ipm_threads_2_par_rayon_budget_sentinel	active
 otspot-core::linalg_ruiz_integration	ruiz_disabled_preserves_legacy_qp_solution	active
 otspot-core::linalg_ruiz_integration	ruiz_scaled_and_unscaled_qp_agree	active
+otspot-core::lp_component_split	basis_dependent_options_skip_split	active
+otspot-core::lp_component_split	connected_problem_not_split	active
+otspot-core::lp_component_split	copy_block_split_on_off_objective_match	active
+otspot-core::lp_component_split	direct_entry_no_presolve_skips_split	active
+otspot-core::lp_component_split	expired_deadline_returns_timeout	active
+otspot-core::lp_component_split	forwarded_unbounded_split_keeps_neg_inf_with_offset	active
+otspot-core::lp_component_split	forwarded_zero_q_splits_despite_no_presolve	active
+otspot-core::lp_component_split	split_box_only_components_closed_form	active
+otspot-core::lp_component_split	split_infeasible_component_wins	active
+otspot-core::lp_component_split	split_two_components_join_optimal_hand_computed	active
+otspot-core::lp_component_split	split_unbounded_component_propagates	active
+otspot-core::lp_component_split	wide_two_component_lp_splits_before_ipm_gate	active
 otspot-core::memory_budget	conic_misocp_route_peak_within_budget	active
 otspot-core::memory_budget	conic_nonconvex_route_peak_within_budget	active
 otspot-core::memory_budget	conic_single_huge_soc_peak_within_budget	active
