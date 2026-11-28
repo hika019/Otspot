@@ -11,7 +11,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - 非凸 QCQP に root-stage FBBT (境界導出) を追加。一部の問題が NOT_SUPPORTED から救済
 - 非凸 QCQP の OA カット再 solve を LP 温開始化し、受理マージン整合と偽 Infeasible 防止を修正
 - 緩和 LP の `Unbounded` を検証済み verdict として扱うようにした。LP simplex の `Unbounded` でも検証済み ray が得られる
-- LP / MILP presolve の forcing 行判定を係数スケーリング式に強化
+- LP / MILP presolve の forcing 行判定を係数スケーリング式に強化。pilot87 系の虚偽 Infeasible を修正
 - presolve の再構築高速化と QP presolve の deadline 抑制。実測: maros 121→131 PASS、miplib_small 5→7 PASS、qplib 11→15 PASS (eps=1e-6 / timeout=1000 / jobs=6)
 
 ## [0.7.6] - 2026-11-11
