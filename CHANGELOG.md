@@ -4,78 +4,15 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-- 非凸 QCQP QP 経路に root-stage FBBT (境界ベース bound 導出) を追加 (計画 §4.1 / 調査 doc §4 step 2)。
-   二次部ゼロの線形行 (`g_lin`/`a_eq` に限る。二次行の線形部を線形伝播に混ぜない構造保証を
-   `qcqp_fbbt::build_lin_rows` が持つ) と、対角専用二次行の平方完成一括評価
-   (`Σ aᵢxᵢ² = c` 型を楕円体として全変数に有限区間を与える。非対角を含む行は全面スキップ、
-   `w_ij` への明示伝播は行わない) を定点反復 (`ROOT_FBBT_MAX_ROUNDS = 10`、named const 根拠 doc 付き)
-   で合成する。誘導 bound は外向き丸め + `feas_tol·(1+|v|)` + ULP slack を**保存前**に適用し、
-   宣言箱を狭める方向にのみ適用 (拡張・空区間生成・NaN 一切なし)。**矛盾行を検出しても
-   Infeasible は返さない** (空領域の証明は緩和側のエスカレーション監査経路に専属。
-   偽 Infeasible の実測先例 `PRESOLVE_ESCALATION` と同じ結論。矛盾行数は計測用のみ公開)。
-   誘導箱は `GlobalSeed.root_lb/root_ub` (refine-only) だけで運び、`qp.lb`/`qp.ub` は書き換えない
-   (計画 line 136)。誘導が何も変えない問題は seed を添付せず従来経路と bit-identical。
-   受理判定を「生 bound で R 内 finite 必須」から「root FBBT 後も非有限が残る変数があれば拒否」
-   (計画 §3.2 line 89、判定集合は `effective_bound_requirement`) へ移動したため、単変数二次行で
-   有限化できる自由変数 (8605 型・自由目的変数 + 不定行など) が NOT_SUPPORTED から救済される。
-   `GlobalSeed` は箱専用 seed (`x` 空・`f = +inf`) を受理 (空 `x` に有限 `f` は corrupt として拒否)。
-   センチネル: `indefinite_row_with_free_objective_var_solves_via_root_fbbt` (ハンドオラクル
-   -√5) / `quadratic_linear_part_never_propagated_as_linear` (計画 §5 sentinel 7) /
-   `outward_rounding_contains_feasible_amplified_point` (丸め・マージン除去で fail) /
-   `fixpoint_cap_terminates_long_chain` / `contradiction_rows_are_counted_never_reported` (task e)。
-   範囲外 (本変更なし): 目的 cutoff・OBBT・ノード時再適用・`w_ij` 伝播
-- 非凸 QCQP 大域解法の OA tangent カット再 solve を親 LP の基底再利用 (温開始) に変更。
-   従来はカット追加ごとに `LpProblem` をコールドスタートで再構築・再 solve しており、
-   A/B ノード probe で QPLIB_1353 にノードあたり solve 6.67 倍 × solve 単価 1.85 倍 =
-   **12.3 倍** (2.43s → 30.0s/node、300s 収容ノード 57 → 7) の退化として実測されていた。
-   カット行は緩和 LP の末尾にのみ追加され standard form の列配置が
-   `[構造変数 | 行順スラック]` であることを利用し、親基底 + 新行スラック列で dual simplex
-   の開始基底を組み立てる (次元・特異性・双対実行可能の各ガードで不整合時は従来どおり
-   コールドに安全フォールバック、正しさ不変)。センチネル
-   `warm_basis_extension_consumes_dual_advanced_resolves` (ハンドオラクル LP、カット
-   違反開始での反復数比較) で回帰を固定。併せて 2 点: (a) 緩和 LP の solve は presolve
-   を常時 OFF (presolve の列番号付けが基底を隠し温開始が無効化されるため。縮退した緩和が
-   数値失敗した場合のみ presolve 経路へエスカレーション再 solve)。自由変数上の ellipsoid
-   型がこれに該当し、`r_empty_ellipsoid_over_free_x_reaches_optimum_end_to_end` が固定する
-   (旧実装では温開始が黙って無効化され、旧テストの前提「presolve が ray を秘匿」も解消され
-   て OA 遠方点 tangent が多胞体を閉じ真最適 -1 に収束する。偽 Unbounded 禁止の不変は
-   変更なく同テストで保持)。(b) OA ループの打ち切り条件に受理マージン整合を追加:
-   従来は per-pair の接線すきまが `bilinear_tol` 以下なら打ち切りとなり、元の二次行の
-   実行可能違反は「行に現れるペアすきまの和」で上縛りされるため、複数ペアが同時に
-   `bilinear_tol` あたりで揃うと打ち切り点が受理マージン `feas_tol` を超えるすきま和を
-   抱えたままになった (ellipsoid 実測: 2 ペアすきま和 2.1e-6 > 1e-6 で実行可能点が
-   復元できず NumericalError)。per-pair のトリガは `bilinear_tol` のまま、すきま和が
-   (元の行の違反は「その行に現れるペアすきま和」で上縛りされるので、行予算 `feas_tol/2`
-   を超えた行のペアのみを比例按分で追加収束させる。和を全ペアの一律予算に落とすと
-   ペア数に比例して追加ラウンドが膨張することを実測で確認し、行単位にした)。(c) presolve OFF の生
-   `Infeasible` 判定は空領域の証明として採用する前に presolve 経路で裏取り再 solve
-   (jitter-band 帰着の QCQP で生判定の偽 Infeasible を実測、センチネル
-   `jitter_band_indefinite_qcqp_falls_back_to_global`)。温開始収束により決定論的に
-   露出した許容整合・証明格付けの不整合を修正
-- BREAKING: 非凸 QCQP 大域解法の「全変数の bound が有限」という不変条件を、§3.1 の
-  bound 要求集合 `R` (非凸行の非対角ペアの端点と、規則 2 に棄却された対角の変数) のみ
-  の要求に縮小した。`NonconvexQcqp` の公開不変条件、`validate`、`Model` / QP 経路の
-  受理ゲート (`require_finite_bounds`) すべてに適用 (`solve_global_qcqp` /
-  `solve_global_miqcp` 経由・`SolveRoute::ConicQcqpNonconvex` Fallback 含む)。
-  `R` 外の変数は自由 (`±inf`) のまま受理され、緩和は非有限箱の変数の
-  box 行・非有限端点を持つペアのエンベロープ行を出力しない。拒否メッセージは旧
-  「全変数 finite 必要」から「`R` 内の非有限変数の数と先頭 index」に変わった
-- BREAKING: `solve_global_qcqp` / `solve_global_miqcp` に初期 incumbent 引数
-  `seed: Option<&GlobalSeed>` を追加 (計画 §3.2 line 112 / 判断 D7)。`GlobalSeed`
-  (`x`/`f` と誘導した根箱 `root_lb`/`root_ub`) は探索開始点として prune と gap に
-  届く位置から効き、`None` は従来動作 (incumbent `+inf`・宣言箱) と完全に一致する。
-  seed はsolver内で再検証 (`x` の実行可能性・目的値の照合・宣言箱を拡張しないこと) を
-  経てから採用され、不正な seed は `NotSupported` として拒否される (信用しない)。
-  局所解法の UB や FBBT 誘導 bound による**実消費は Phase 2 の仕事**で、本変更は公開
-  配線まで (内部 QP 経路は当面 `None` を渡す)
-- 緩和 LP の `Unbounded` を検証済み verdict として扱うようにした (計画 §3.2 line
-  98-111): simplex 検証済み ray と元問題の実行可能基点 `x̃` が揃えば `Unbounded`
-  (objective `-inf`)、検証できなければ理由付き `NotSupported` を返し、数値破綻
-  (`numerical_failures`) には計上しない。分枝で解消できない非有界方向による無限探索が
-  構造的に消える
-- LP simplex の `Unbounded` でも `SolverResult::ray_certificate` (検証済み recession
-  ray + 基点) が得られるようになった (QP IPM と同一の独立検証器を通し、presolve 縮約
-  時は偽証防止のため `None`)。v0.7.6 の QP IPM 向け記載の LP 経路への拡張
+## [0.7.7] - 2026-11-28
+
+- BREAKING: 非凸 QCQP の受理条件を、全変数有限 bound から bound 要求集合のみへ緩和
+- BREAKING: `solve_global_qcqp` / `solve_global_miqcp` に初期 incumbent (`GlobalSeed`) 引数を追加
+- 非凸 QCQP に root-stage FBBT (境界導出) を追加。一部の問題が NOT_SUPPORTED から救済
+- 非凸 QCQP の OA カット再 solve を LP 温開始化し、受理マージン整合と偽 Infeasible 防止を修正
+- 緩和 LP の `Unbounded` を検証済み verdict として扱うようにした。LP simplex の `Unbounded` でも検証済み ray が得られる
+- LP / MILP presolve の forcing 行判定を係数スケーリング式に強化。pilot87 系の虚偽 Infeasible を修正
+- presolve の再構築高速化と QP presolve の deadline 抑制。実測: maros 121→131 PASS、miplib_small 5→7 PASS、qplib 11→15 PASS (eps=1e-6 / timeout=1000 / jobs=6)
 
 ## [0.7.6] - 2026-11-11
 
